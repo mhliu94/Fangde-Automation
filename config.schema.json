@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fangde session configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token"],
+      "properties": {
+        "token": {"type": "string", "minLength": 1, "description": "Private Fangde login token. Never commit a real value."},
+        "trade_token": {"type": "string", "default": "", "description": "Optional existing trade token. Not required in the verified holdings session."}
+      }
+    },
+    "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 120, "default": 30},
+    "headers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Version": {"type": "string"},
+        "Agent": {"type": "string"},
+        "Agent-Name": {"type": "string"},
+        "brand": {"type": "string"},
+        "Device-Id": {"type": "string"},
+        "uniqueId": {"type": "string"},
+        "Device-Name": {"type": "string"},
+        "Device-Version": {"type": "string"},
+        "Software": {"type": "string"},
+        "package": {"type": "string"},
+        "Accept-Language": {"type": "string"},
+        "Channel": {"type": "string"},
+        "apptheme": {"type": "string"}
+      }
+    }
+  }
+}

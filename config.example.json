@@ -1,0 +1,20 @@
+{
+  "$schema": "./config.schema.json",
+  "session": {
+    "token": "REPLACE_WITH_CURRENT_FANGDE_LOGIN_TOKEN",
+    "trade_token": ""
+  },
+  "headers": {
+    "Version": "7.7.1",
+    "Agent": "Android",
+    "Agent-Name": "Pixel 8 Pro",
+    "brand": "google",
+    "Device-Id": "REPLACE_WITH_EXPORTED_DEVICE_ID",
+    "uniqueId": "REPLACE_WITH_EXPORTED_DEVICE_ID",
+    "Device-Name": "Android",
+    "Software": "fd_app",
+    "package": "com.fdzq.app",
+    "Accept-Language": "zh-CN"
+  },
+  "timeout_seconds": 30
+}

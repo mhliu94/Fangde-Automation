@@ -1,0 +1,67 @@
+# Real configuration and credentials, at any depth.
+config*.json
+!config.example.json
+!config.*.example.json
+!config.schema.json
+*.local.json
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+private/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Account data and runtime output. Put custom output filenames in data/.
+data/
+results/
+outputs/
+holdings*.json
+holdings*.csv
+summary*.json
+accounts*.json
+*.log
+*.log.*
+
+# Temporary files, session exports, APKs, and private delivery archives.
+work/
+tmp/
+*.tmp
+*.bak
+*.mmkv
+*.crc
+*.apk
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# Python and tooling.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Editors and operating systems.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
