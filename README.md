@@ -1,101 +1,106 @@
-# Fangde Automation
+# Fangde API automation for Linux
 
-A read-only Python client for Fangde securities holdings, asset summaries, and account lists. It uses an existing authenticated app session and runs without an Android phone or emulator. Python 3.10+ and system TLS certificates are required; there are no third-party Python dependencies.
+Fangde adapter for the command formats and Linux workflow in
+[GigaMoney-Automation-Linux](https://github.com/mhliu94/GigaMoney-Automation-Linux),
+based on commit `031709523a00607a50f1caaabf05afca23081c61`.
 
-The protocol was inspected in Fangde Android app `com.fdzq.app`, version 7.7.1. Direct holdings, summary, and account-list requests were verified on Windows. Linux server deployment has not yet been tested. This project uses an undocumented app API and is not an official Fangde SDK.
+Use the rooted Pixel 8 Pro on the home Windows computer to export each account's
+authenticated session. Each Linux server receives its own account configuration,
+session file, Kafka consumer group, and persistent working directory.
 
-## Setup
+## Implemented
 
-For a fresh clone, copy the template and populate the session credentials and device identifiers:
+| Function | Fangde behavior |
+|---|---|
+| Holdings | USD cash and US stock positions; average cost, market value, daily P/L |
+| Market order | Broker market order during the regular US session |
+| Extended-hours market command | Converted to a DAY limit using the opposite side of a fresh Kafka book |
+| Limit order | DAY limit; price rounding follows GigaMoney's cent rounding toward the order side |
+| Emulated FOK | Submit a limit, wait, then cancel an unfilled remainder and confirm broker status |
+| Cancellation | One exact order number or all currently active, cancelable US orders |
+| Today's orders | Fangde's today endpoint; retains broker-listed carryover/strategy orders |
+| History | Optional date-range query with complete pagination |
+| Kafka | Commands, periodic/post-order account snapshots, cached price books |
+| Order status | KTrader v1 snapshots, exact string IDs, durable acknowledged outbox |
+| Command center | HTTPS login, CSRF protection, runner start/stop, logs and machine health |
+| Operations | Session inspection/import, account binding, persistent order journal, systemd unit rendering |
+| Authentication | Password login after logout/expiry, independent trading-password unlock, atomic token storage |
 
-```bash
-cp config.example.json config.json
-chmod 600 config.json
-```
+The emulated FOK workflow **can partially fill** and cannot roll back fills. It
+is not an exchange-native all-or-nothing FOK instruction. A cancel acknowledgment
+is followed by status checks; a fill racing with cancellation is reported as a fill.
 
-On Windows, use `Copy-Item config.example.json config.json` instead. If a populated `config.json` already exists, retain it. The configuration template references `config.schema.json` for editor validation. Actual tokens belong only in a private config file.
+## Validation and limits
 
-Validate the config locally without contacting Fangde:
+The adapter's holdings, today-order, order-detail, security-settings and paginated
+history reads have been checked against Fangde 7.7.1.
+Order submission/cancellation payloads were implemented from the app's code and
+tested with simulated responses. **No live financial write was performed.**
 
-```bash
-python3 fangde_holdings.py --check-config
-```
+Linux service behavior and the actual Kafka cluster still need deployment
+validation. The offline suite covers transport, account binding, status mapping,
+partial fills, uncertain submissions, cancellation races, command handling,
+price books, outbox recovery, and command-center HTTP authentication.
 
-On Windows, replace `python3` with your Python launcher, such as `python` or `py -3`.
+Password login and trading unlock were verified live on 2026-10-27, followed by
+holdings reads. A password-enabled export lets Linux recover a rejected login
+and unlock a missing/expired trading session. It uses password authentication;
+no Fangde refresh-token mechanism is assumed. SMS verification is outside scope.
 
-## Retrieve account data
+Reads can resume after successful recovery. Order submission/cancellation first
+checks authentication with a holdings read; a dispatched order or cancellation
+is never automatically replayed. A failed/interrupted password attempt is latched
+to prevent repeated attempts. The runner then reports `authentication_required`.
+After correcting credentials, explicitly retry or import a fresh export.
 
-```bash
-python3 fangde_holdings.py holdings --output data/holdings.json --csv data/holdings.csv
-python3 fangde_holdings.py summary --output data/summary.json
-python3 fangde_holdings.py accounts --output data/accounts.json
-```
+The private export contains password-equivalent values as well as tokens and
+device headers. Base64 is not encryption. Password setup upgrades the account
+binding to version 3, distinguishing brokerage accounts that share one user.
+Switching accounts on the phone can revoke sessions; check the assigned server.
+Long-term token lifetime and remote-server access still need deployment validation.
 
-The client creates the output directory as needed. Without `--output`, it prints JSON to stdout. Use `--config /secure/path/config.json` to select another config; the default is `config.json` beside the script, regardless of the working directory.
+Current trading support is US stocks, whole-share buys and long sells, DAY
+market/limit orders. Portfolio publishing stops on unsupported assets rather
+than publishing an incomplete account. Existing strategy orders are queryable
+and cancelable when their status is understood; creating strategy orders is not
+part of this adapter.
 
-Holdings JSON includes normalized positions, the full portfolio data, and a UTC retrieval timestamp. Values retain the precision returned by Fangde. The `currency` field uses the broker's ISO currency string; its separate `ccy` field can be a numeric internal identifier. Prices are broker snapshot values. The retrieval timestamp is not a quote timestamp.
+All new orders require a fresh Kafka price-book reference, including explicit
+limits and regular-session markets, because Fangde's app supplies a reference
+price. For a market order this reference is **not a price cap**. The calendar uses
+`exchange_calendars` XNYS sessions, including holidays, DST and early closes;
+it cannot detect unexpected closures or instrument halts. Overnight market
+commands are rejected. Explicit limits retain the GigaMoney extended-session
+behavior. See [protocol notes](docs/protocol.md).
 
-The holdings command returns the securities portfolio associated with the configured token. It does not aggregate other accounts, options, futures, or funds. The summary command returns the broker's broader asset summary. The account-list command redacts returned token fields.
+## Use
 
-## Credentials and session renewal
+See [deployment and account exports](docs/deployment.md),
+[commands and Kafka contracts](docs/commands.md), and
+[validation record](VALIDATION.md).
 
-`config.json` contains an existing login session, not a permanent API key. Keep it private. Fangde controls session expiry, revocation, device restrictions, and verification requirements. The token may grant more access than this read-only client exposes.
-
-If Fangde requires renewed authentication, sign in through the app and export a fresh session on a computer connected to the rooted phone:
-
-```bash
-python3 export_session.py --adb /path/to/adb --replace
-```
-
-For multiple attached devices, add `--serial YOUR_DEVICE_SERIAL`. The export utility reads only the app's session and device-ID MMKV files and makes no network requests. ADB and a rooted phone are needed for export only. Its app metadata targets the inspected 7.7.1 / Pixel 8 Pro setup; a different version or device may require adjustment.
-
-The optional `session.trade_token` field is empty by default. A trade token was not needed for the verified holdings requests. The client does not request SMS codes, log in, refresh tokens, or bypass verification. Trading and transfers are not implemented.
-
-## Linux deployment
-
-Copy or clone the source onto the server. Transfer the populated `config.json` separately through a secure channel; it will not come from GitHub. Then:
-
-```bash
-cd /path/to/fangde-automation
-chmod 600 config.json
-python3 fangde_holdings.py --check-config
-python3 fangde_holdings.py --output data/holdings.json --csv data/holdings.csv
-```
-
-There is no installation step or `pip install` requirement. The client writes owner-only output files on Unix. Access from a different server IP may trigger Fangde verification.
-
-## GitHub hygiene
-
-The `.gitignore` excludes real configs, environment secrets, account snapshots, `data/`, temporary app inspections, private archives, logs, and Python caches. `config.example.json` and `config.schema.json` are intended to be committed. Keep arbitrary result filenames inside `data/` so that they are excluded too.
-
-Before publishing, review the staged paths and changes:
-
-```bash
-git status --short
-git diff --cached --stat
-git diff --cached
-```
-
-Never force-add credentials or account data. Ignore rules do not remove files already committed to Git history. Repository documentation and tests use no personal portfolio data or real device identifiers.
-
-## Error handling
-
-Exit code `0` means success; `2` means a configuration, connection, protocol, or API error. Failed requests preserve prior output files, so callers should check the exit code and `retrieved_at` before using an existing snapshot. Malformed responses are reported as errors rather than empty portfolios.
-
-Requests use validated HTTPS, do not follow redirects, and ignore inherited proxy settings. Only the three read operations below are implemented. They use HTTP POST because that is how the app defines them; they do not submit trades.
-
-| Operation | Endpoint |
-| --- | --- |
-| `holdings` | `https://apitrade.techfx88.com/trade/index/portfolio` |
-| `summary` | `https://apitrade.techfx88.com/trade/asset/summary2` |
-| `accounts` | `https://apitrade.techfx88.com/user/index/account_list` |
-
-The request signature follows the inspected app: `_t` is Unix epoch seconds and `_sign` is lowercase MD5 of `token + _t + "U7KK2GV5GH68"`. The suffix is a public app protocol constant, not an account secret. A success response has `status == 0` and a `data` payload.
-
-## Tests
+The original `fangde_holdings.py` and `export_session.py` remain available with
+their original configuration format. See [legacy instructions](docs/legacy-holdings.md).
+Use `python -m fangde.session_export` for the full package's account-bound exports.
 
 ```bash
-python3 -m unittest -v
+python3 -m venv .venv
+.venv/bin/pip install -e '.[kafka,dev]'
+.venv/bin/python -m pytest -q
+.venv/bin/fangde --help
 ```
 
-Tests run offline with synthetic credentials. They cover request signing, endpoint restrictions, redirects, API errors, credential redaction, response validation, numeric precision, CSV formulas, output protection, and session export parsing. They make no broker requests.
+The direct CLI defaults to a preview for orders and cancellations. Use `--execute`
+to send them yourself. The Kafka runner executes commands after trading is enabled;
+new configurations default to trading disabled. Cancellation commands remain
+available while new-order intake is disabled.
+
+Keep `work/api/orders/`, `work/api/order-status/`, and `work/trading-state.json`
+when updating or moving an account. They contain duplicate protection, publication
+sequences and the account's enabled state. Do not share one state directory between accounts.
+
+`config/server.example.json` is the operational template. The larger
+`config/fangde.config.example.json` lists all inherited settings, including dormant
+command-center emulator settings. The backend is API-only; Linux needs the private
+account export but no phone, emulator, Android SDK, interception proxy, or GigaMoney
+signing profile. Configure passwords locally on Windows as described in deployment.

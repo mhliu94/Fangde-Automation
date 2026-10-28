@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fangde-automation-linux"
+version = "0.2.0"
+description = "Fangde API trading workflows with a shared Linux Kafka runner"
+requires-python = ">=3.10"
+dependencies = ["tzdata>=2025.2", "exchange-calendars>=4.11,<5"]
+
+[project.optional-dependencies]
+kafka = ["confluent-kafka>=2.5"]
+api = []
+bootstrap = ["cryptography>=43"]
+dev = ["pytest>=8", "jsonschema>=4.18", "cryptography>=43"]
+
+[project.scripts]
+fangde = "fangde.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fangde*"]
+
+[tool.setuptools.package-data]
+fangde = ["monitor_web/*.html", "monitor_web/*.js", "monitor_web/*.css"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "test_holdings.py"]

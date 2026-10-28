@@ -1,0 +1,76 @@
+{
+  "paths": {
+    "workDir": "work",
+    "logDir": "logs"
+  },
+  "logging": {
+    "level": "INFO"
+  },
+  "fangde": {
+    "backend": "api",
+    "accountId": "",
+    "accountNumId": null,
+    "tradingEnabledDefault": false
+  },
+  "api": {
+    "sessionPath": "",
+    "subjectSha256": "",
+    "brokerTimezone": "Asia/Hong_Kong",
+    "maxOrderPages": 100,
+    "orderActionDelaySeconds": 5,
+    "postOrderPublishDelaySeconds": 2,
+    "fokWaitSeconds": 2,
+    "positionCost": "average",
+    "orderTimezone": "America/New_York",
+    "extendedHoursMarketOrders": true,
+    "requestTimeoutSeconds": 15,
+    "maxResponseBytes": 4194304,
+    "readAttempts": 2,
+    "readRetryDelaySeconds": 0.25,
+    "cancelPollDelaysSeconds": [
+      0,
+      1,
+      1,
+      2
+    ]
+  },
+  "service": {
+    "name": "fangde-runner",
+    "restartSeconds": 10
+  },
+  "kafka": {
+    "bootstrapServers": "",
+    "commandTopic": "trading-commands",
+    "accountDetailsTopic": "account-details",
+    "orderStatusTopic": "order-status",
+    "consumerGroupId": "",
+    "priceBooksTopic": "price-books",
+    "priceBookMaxAgeSeconds": 300,
+    "priceBookPollIntervalSeconds": 30,
+    "priceBookLookbackSeconds": 3600,
+    "priceBookTimeoutSeconds": 30,
+    "priceBookBatchSize": 500,
+    "autoOffsetReset": "latest",
+    "pollTimeoutSeconds": 1,
+    "maxPollIntervalMilliseconds": 900000,
+    "maxCommandAgeSeconds": 300,
+    "commitFailedCommands": true,
+    "holdingsIntervalSeconds": 30,
+    "clientVersion": "2.15.0",
+    "sessionTimeoutMilliseconds": 10000,
+    "deliveryTimeoutSeconds": 10,
+    "producerLingerMilliseconds": 5,
+    "clientConfig": {}
+  },
+  "monitor": {
+    "serverId": "",
+    "host": "127.0.0.1",
+    "port": 8787,
+    "publicHost": "",
+    "certFile": "",
+    "keyFile": "",
+    "adminUsername": "admin",
+    "adminPassword": "",
+    "runnerLog": ""
+  }
+}
