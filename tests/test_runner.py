@@ -9,6 +9,8 @@ from unittest.mock import Mock, patch
 
 from fangde.config import Settings
 from fangde.diagnostics import command_context
+from fangde.errors import SafetyError
+from fangde.lock import EmulatorLock
 from fangde.runner import (
     TradingRunner, command_is_stale, command_plan, holdings_snapshot, nullable_number,
 )
@@ -46,6 +48,40 @@ class RunnerTests(unittest.TestCase):
         return Settings({
             "fangde": {"accountId": "GIGA-A", "accountNumId": 7},
         }, root / "config.json", root)
+
+    def test_live_start_enables_saved_state_before_intake(self):
+        runner = TradingRunner(self.settings())
+        runner._set_trading_enabled(False)
+        with patch.object(runner, '_operation'), patch.object(runner, '_run_kafka') as intake:
+            intake.side_effect = lambda: self.assertTrue(runner._trading_enabled())
+            runner.run(live=True)
+        self.assertTrue(TradingRunner(runner.settings)._trading_enabled())
+        self.assertEqual(runner.state_path.stat().st_mode & 0o777, 0o600)
+
+    def test_live_start_cannot_enable_another_running_process(self):
+        runner = TradingRunner(self.settings())
+        runner._set_trading_enabled(False)
+        before = runner.state_path.read_bytes()
+        with EmulatorLock(runner.settings.work_dir / 'runner.lock', 0):
+            with self.assertRaises(SafetyError):
+                runner.run(live=True)
+        self.assertEqual(runner.state_path.read_bytes(), before)
+
+    def test_normal_start_preserves_saved_trading_state(self):
+        runner = TradingRunner(self.settings())
+        for enabled in (False, True):
+            runner._set_trading_enabled(enabled)
+            before = runner.state_path.read_bytes()
+            with patch.object(runner, '_operation'), patch.object(runner, '_run_kafka'):
+                runner.run()
+            self.assertEqual(runner.state_path.read_bytes(), before)
+
+    def test_cli_forwards_explicit_live_start(self):
+        from fangde.cli import main
+        with patch('fangde.cli.load_settings', return_value=self.settings()), \
+             patch('fangde.cli.TradingRunner') as runner:
+            self.assertEqual(main(['runner', '--live']), 0)
+        runner.return_value.run.assert_called_once_with(live=True)
 
     def test_routing_and_guards(self):
         market = command_plan({

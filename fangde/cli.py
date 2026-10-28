@@ -68,7 +68,8 @@ def _parser() -> argparse.ArgumentParser:
     single.add_argument("--execute", action="store_true")
     single.add_argument("--dry-run", action="store_true")
 
-    sub.add_parser("runner", help="run Kafka consumer and periodic holdings publisher in foreground")
+    runner = sub.add_parser("runner", help="run Kafka consumer and periodic holdings publisher in foreground")
+    runner.add_argument("--live", action="store_true", help="enable and persist live trading before starting")
     sub.add_parser("runner-status", help="report runner PID state")
     stop = sub.add_parser("runner-stop", help="request a graceful runner stop")
     stop.add_argument("--force", action="store_true", help="also send SIGTERM after validating the PID")
@@ -229,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             with _locked(settings):
                 _json(_automation(settings, "cancel").cancel_all(dry_run=not arguments.execute))
         elif arguments.command == "runner":
-            TradingRunner(settings).run()
+            TradingRunner(settings).run(live=arguments.live)
         elif arguments.command == "runner-status":
             _json(runner_status(settings))
         elif arguments.command == "runner-stop":

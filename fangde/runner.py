@@ -178,10 +178,11 @@ class TradingRunner:
             return bool(self.settings.get("fangde.tradingEnabledDefault", False))
 
     def _set_trading_enabled(self, enabled: bool) -> None:
-        self.state_path.write_text(json.dumps({
+        from .api import save_session
+        save_session(self.state_path, {
             "tradingEnabled": enabled,
             "updatedAt": datetime.now(timezone.utc).isoformat(),
-        }) + "\n", encoding="utf-8")
+        })
 
     def _operation(self, kind: str, arguments: dict[str, Any]) -> dict:
         if self.backend == "api":
@@ -257,11 +258,14 @@ class TradingRunner:
 
         return self.order_publisher.publish(snapshots, deliver)
 
-    def run(self) -> None:
+    def run(self, *, live: bool = False) -> None:
         # Prevent an Android and API runner (or two API runners) from consuming
         # simultaneously and overwriting each other's PID/command state.
         with EmulatorLock(self.settings.work_dir / "runner.lock", 0):
             from .api import AuthenticationRequired
+            if live:
+                self._set_trading_enabled(True)
+                LOG.info("Live trading enabled for account_id=%s.", self.settings.require("fangde.accountId"))
             try:
                 if self.backend == "api":
                     self._operation("recover", {})

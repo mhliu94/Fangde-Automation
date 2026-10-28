@@ -22,6 +22,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP"
           "$GITHUB_WORKSPACE/start.sh" --check
+          "$GITHUB_WORKSPACE/start_live.sh" --check
           "$GITHUB_WORKSPACE/start-monitor.sh" --check
           systemd-analyze verify "$RUNNER_TEMP/private state/work/systemd/"*.service
       - name: Verify reinstall preserves renewed credentials and runtime state

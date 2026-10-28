@@ -151,6 +151,27 @@ From a separate terminal, its existing status/stop commands are available:
 .venv/bin/fangde runner-stop
 ```
 
+To enable live trading and run in the background with `nohup`, use:
+
+```bash
+./start_live.sh --check
+./start_live.sh
+```
+
+`--check` only validates local configuration; it does not enable trading or start
+anything. The normal invocation enables new orders, persists that state across
+restarts, and appends output to the account's `logs/runner.log` (or configured
+`monitor.runnerLog`). It prints the PID and log path. Use `runner-status` to check
+startup and `runner-stop` to stop this background process. `FANGDE_CONFIG` can
+select a different configuration. The monitor is not started.
+
+Stop an existing runner first. For a systemd-managed runner, use
+`systemctl --user stop fangde-ACCOUNT_ID-runner.service`, replacing `ACCOUNT_ID`
+with the configured account ID. The live launcher refuses to start a second
+runner; the process also holds its exclusive lock before changing trading state.
+`nohup` survives terminal logout but does not restart a crashed process or start
+it after a reboot. Use the systemd setup below for supervision.
+
 The HTTPS monitor is a separate foreground process. Set `monitor.adminPassword`,
 `monitor.certFile` and `monitor.keyFile` in the runtime configuration, then run:
 

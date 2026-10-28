@@ -25,6 +25,9 @@ chmod 600 /private/account.deployment.json
 command, `./start-monitor.sh`, after configuring its dashboard password and TLS
 certificate/key. Neither process automatically launches the other. Installation
 starts neither process; `./start.sh --check` validates local files without connecting.
+Use `./start_live.sh` to enable live trading and launch the runner in the background
+with `nohup`; stop any existing runner first. `./start_live.sh --check` only validates
+the local setup. Live trading stays enabled across subsequent restarts.
 
 The one-file bundle holds the account export and server settings, including Kafka.
 Setup derives the account binding and consumer group, installs dependencies, and
