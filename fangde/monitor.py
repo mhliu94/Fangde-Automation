@@ -83,7 +83,8 @@ def parse_datetime(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        # Python 3.10 requires a dot for fractional seconds in logging timestamps.
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00").replace(",", "."))
     except (TypeError, ValueError):
         return None
     if parsed.tzinfo is None:
