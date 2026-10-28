@@ -8,6 +8,30 @@ Use the rooted Pixel 8 Pro on the home Windows computer to export each account's
 authenticated session. Each Linux server receives its own account configuration,
 session file, Kafka consumer group, and persistent working directory.
 
+## Linux quick start
+
+With Git, Python 3.10+ and its venv package installed, upload the private account
+deployment file to the assigned server, then run:
+
+```bash
+git clone https://github.com/mhliu94/Fangde-Automation.git
+cd Fangde-Automation
+chmod 600 /private/account.deployment.json
+./install.sh /private/account.deployment.json
+./start.sh
+```
+
+`start.sh` starts only the **Kafka trading runner**. The HTTPS monitor has its own
+command, `./start-monitor.sh`, after configuring its dashboard password and TLS
+certificate/key. Neither process automatically launches the other. Installation
+starts neither process; `./start.sh --check` validates local files without connecting.
+
+The one-file bundle holds the account export and server settings, including Kafka.
+Setup derives the account binding and consumer group, installs dependencies, and
+keeps credentials, logs and order records outside the checkout. Reinstallation
+preserves renewed tokens and runtime state. See [deployment](docs/deployment.md)
+for creating the bundle on Windows, updates and separate systemd services.
+
 ## Implemented
 
 | Function | Fangde behavior |
@@ -37,8 +61,9 @@ history reads have been checked against Fangde 7.7.1.
 Order submission/cancellation payloads were implemented from the app's code and
 tested with simulated responses. **No live financial write was performed.**
 
-Linux service behavior and the actual Kafka cluster still need deployment
-validation. The offline suite covers transport, account binding, status mapping,
+Live Linux service operation and the actual Kafka cluster still need deployment
+validation. CI checks Linux installation and local startup prerequisites using
+synthetic credentials. The offline suite covers transport, account binding, status mapping,
 partial fills, uncertain submissions, cancellation races, command handling,
 price books, outbox recovery, and command-center HTTP authentication.
 

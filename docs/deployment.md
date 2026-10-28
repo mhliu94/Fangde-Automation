@@ -35,7 +35,7 @@ holdings. It replaces the export only after success. This setup needs no recorde
 or Frida attachment. Password entry is once per account or password change.
 
 The resulting version-3 identity digest differs from the token-only version-2
-digest. Use the digest printed after password setup in the server configuration.
+digest. The Linux installer derives this binding from the exported file.
 For password changes, rerun password setup on that account's private export.
 Do not replace a version-3 profile with the token-only phone exporter; use a new
 output file if bootstrapping from the phone again.
@@ -45,28 +45,65 @@ an encrypted archive. Base64 encoding does not protect the passwords. Transfer i
 to its assigned server using your SSH/SCP connection. Do not put it in Git, chat,
 the shared source ZIP, or another account's working directory.
 
-## Configure each Linux server
+Combine the export and Kafka address into one deployment file on Windows:
 
-Install Python 3.10+ with venv support, extract the code, and enter its directory:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[kafka]'
-cp config/server.example.json config/fangde.config.json
-chmod 600 config/fangde.config.json /private/FANGDE-A.session.json
-.venv/bin/fangde session-inspect /private/FANGDE-A.session.json
+```powershell
+python -m fangde.deployment bundle --session C:\private\FANGDE-A.session.json --output C:\private\FANGDE-A.deployment.json --kafka-bootstrap broker.example.com:9092
 ```
 
-Edit these configuration fields:
+Pass `--settings C:\private\server-settings.json` to include optional overrides,
+such as Kafka SASL/TLS settings, topic names, numeric account ID or monitor options.
+The settings file uses the same structure as `config/server.example.json`; include
+only the fields you need. The bundle command rejects a mismatched account binding
+and refuses to overwrite an existing output. Use a new filename for an updated bundle.
+The deployment file contains credentials; transfer it privately to its assigned server.
+
+## Configure each Linux server
+
+Install Git and Python 3.10+ with venv support. On Debian/Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install git python3 python3-venv
+git clone https://github.com/mhliu94/Fangde-Automation.git
+cd Fangde-Automation
+chmod 600 /private/FANGDE-A.deployment.json
+./install.sh /private/FANGDE-A.deployment.json
+./start.sh --check
+```
+
+Setup creates `.venv`, installs the Kafka dependencies, derives the logical account
+ID and broker binding, and writes a private runtime configuration. No login, broker
+request, Kafka connection or service startup occurs during setup or `--check`.
+`FANGDE_PYTHON=/path/to/python3.12 ./install.sh ...` selects another Python version.
+
+An existing plain session/password export is also accepted:
+
+```bash
+./install.sh /private/FANGDE-A.session.json --kafka-bootstrap broker.example.com:9092
+```
+
+The default state directory is `${XDG_STATE_HOME:-$HOME/.local/state}/fangde/account-FANGDE-A`.
+Use `--state-dir /absolute/private/directory` to choose another location outside
+the checkout. It contains `server.config.json`, `session.json`, `work/` and `logs/`.
+The checkout's ignored `config/deployment.json` points to the runtime configuration;
+commands work from any current directory. An explicit `--config` or `FANGDE_CONFIG`
+overrides that selection.
+
+Do not reuse a checkout or state directory for a different account. Setup checks
+both the logical label and broker identity. Existing manual configurations remain
+supported by the direct CLI; use a fresh checkout for managed installation.
+
+For optional customization, edit the private `server.config.json` printed by setup:
 
 | Setting | Value |
 |---|---|
-| `fangde.accountId` | Exact exported logical account ID and Kafka `account_id` |
+| `fangde.accountId` | Derived exported logical ID and Kafka `account_id`; keep unchanged |
 | `fangde.accountNumId` | Optional existing KTrader numeric account ID |
-| `api.subjectSha256` | Identity digest printed by `session-inspect` |
-| `paths.workDir`, `paths.logDir` | Absolute private state/log directories on this server |
+| `api.subjectSha256` | Derived broker identity binding; keep unchanged |
+| `paths.workDir`, `paths.logDir` | Derived private state/log directories; preserve on update |
 | `kafka.bootstrapServers` | Your Kafka cluster |
-| `kafka.consumerGroupId` | **Unique per account**; e.g. `fangde-account-a` |
+| `kafka.consumerGroupId` | Derived as `fangde-FANGDE-A`; must be unique per account |
 | `kafka.*Topic` | Existing command, account-details, order-status and price-book topics |
 | `kafka.clientConfig` | Your SASL/TLS options, if required |
 | `monitor.serverId` | This Linux server's display name |
@@ -74,15 +111,19 @@ Edit these configuration fields:
 | `monitor.certFile`, `monitor.keyFile` | TLS certificate/key paths |
 | `monitor.host`, `monitor.port`, `monitor.publicHost` | Intended listen address and hostname |
 
+The minimal bundle uses the default Kafka client settings with no SASL/TLS overrides.
+If the cluster requires authentication, supply `kafka.clientConfig` in the private
+settings file. Certificate/key paths in the bundle are resolved relative to its
+location on Linux; the referenced files must also be transferred to that server.
+
 Different accounts must not share a Kafka consumer group: a group distributes
 messages among servers, while each server deliberately ignores other accounts.
 Use exactly one active runner per brokerage account. Relative paths resolve from
 the installed project root; absolute paths make separate deployments clearer.
 
-Import and validate without sending an order:
+Validate reads after installation, when ready to connect:
 
 ```bash
-.venv/bin/fangde session-import /private/FANGDE-A.session.json
 .venv/bin/fangde validate-config
 .venv/bin/fangde holdings
 .venv/bin/fangde today-orders
@@ -91,49 +132,84 @@ Import and validate without sending an order:
 ```
 
 The last command is a **preview** and its price is only an illustrative input.
-Supply your own intended order if validating trading. Session import checks both
-the logical ID and broker identity, then atomically writes `api.sessionPath`
-(default `work/api/session.json`). It does not start services. Files written on
-Linux use mode 600; working state directories use 700 where created by the API code.
+Supply your own intended order if validating trading. Private files use mode 600
+and the managed state directory uses 700. New configurations start with trading
+disabled; existing enabled state is preserved during updates.
 
 ## Run and supervise
 
-After configuring and validating the server, the operator can run:
+The trading script is the Kafka runner. Start it in the foreground with:
 
 ```bash
-.venv/bin/fangde runner
+./start.sh
+```
+
+From a separate terminal, its existing status/stop commands are available:
+
+```bash
 .venv/bin/fangde runner-status
 .venv/bin/fangde runner-stop
 ```
 
-For a user systemd service, render the unit on that Linux server so its paths and
-interpreter are correct:
+The HTTPS monitor is a separate foreground process. Set `monitor.adminPassword`,
+`monitor.certFile` and `monitor.keyFile` in the runtime configuration, then run:
 
 ```bash
-.venv/bin/fangde render-service
-mkdir -p ~/.config/systemd/user
-cp work/systemd/fangde-runner.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now fangde-runner.service
+./start-monitor.sh --check
+./start-monitor.sh
 ```
 
-The generated unit path is printed; use that path if `paths.workDir` was changed.
+Starting either process does not start the other. The dashboard requires its own
+login and protects control requests with CSRF/session checks. Its listener defaults
+to `127.0.0.1`; configure the intended address and TLS hostname for remote access.
+Existing `fangde monitor-start`, `monitor-status` and `monitor-stop` commands remain
+available for manual background operation.
+
+For systemd supervision, install the two independent user units:
+
+```bash
+./install.sh /private/FANGDE-A.deployment.json --systemd
+systemctl --user enable --now fangde-FANGDE-A-runner.service
+```
+
+`--systemd` writes both units and reloads the user manager; it does not enable or
+start either service. Unit names use the exported account ID. To start the monitor
+separately, after configuring its password and TLS files:
+
+```bash
+systemctl --user enable --now fangde-FANGDE-A-monitor.service
+```
+
+For startup without an interactive login, the administrator can enable the user's
+systemd lingering with `sudo loginctl enable-linger USERNAME`. Both units append to
+separate files in the account's `logs/` directory. Generated unit paths are printed
+by setup, and each service runs a local configuration check before starting.
 If systemd manages the runner, use systemd for lifecycle control; a force-stop
 from the dashboard can be restarted by systemd's `Restart=on-failure` setting.
 Alternatively let the dashboard start/stop the runner directly, without enabling
 the systemd runner service.
 
-The HTTPS command center is launched separately:
+## Update an installation
+
+Stop both processes before changing code or dependencies. If using systemd:
 
 ```bash
-.venv/bin/fangde monitor-start
-.venv/bin/fangde monitor-status
-.venv/bin/fangde monitor-stop
+systemctl --user stop fangde-FANGDE-A-runner.service fangde-FANGDE-A-monitor.service
+git pull --ff-only
+./install.sh /private/FANGDE-A.deployment.json --systemd
+systemctl --user start fangde-FANGDE-A-runner.service
 ```
 
-Use the configured TLS URL. The dashboard requires its own login and protects
-control requests with CSRF/session checks. It shows the runner and machine health;
-no server emulator is needed. Its listener defaults to `127.0.0.1`.
+Start the monitor separately if needed. For foreground operation, stop the commands
+with Ctrl+C, omit `--systemd`, and restart the chosen command. Setup refuses to update
+an active runner. Reinstallation preserves the installed configuration, renewed
+tokens, order journal, publication records and trading-enabled state. It does not
+reset these from an older uploaded file.
+
+To intentionally replace credentials after re-exporting the same account, pass
+`--refresh-session`. To apply settings from an updated bundle or `--settings` file,
+pass `--update-settings`. To move to a fresh checkout on the same server, supply the
+existing `--state-dir` so that account state is retained. Stop the old installation first.
 
 ## Expired sessions and uncertain requests
 

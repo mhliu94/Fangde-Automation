@@ -115,5 +115,6 @@ Thumbs.db
 session.json
 *.session.json
 *.credentials.json
+*.deployment.json
 *.pcap
 *.pcapng

@@ -168,7 +168,19 @@ class Settings:
 
 def default_config_path() -> Path:
     env_path = os.environ.get("FANGDE_CONFIG")
-    return Path(env_path).expanduser() if env_path else project_root() / "config" / "fangde.config.json"
+    if env_path:
+        return Path(env_path).expanduser()
+    pointer = project_root() / 'config' / 'deployment.json'
+    if pointer.exists():
+        try:
+            data = json.loads(pointer.read_text(encoding='utf-8'))
+            target = Path(data['config'])
+            if data.get('format') != 'fangde-installation' or not target.is_absolute():
+                raise ValueError()
+            return target
+        except (OSError, ValueError, KeyError, TypeError):
+            raise ConfigurationError('Invalid deployment pointer; rerun install.sh with the account file.') from None
+    return project_root() / 'config' / 'fangde.config.json'
 
 
 def load_settings(path: str | Path | None = None, *, allow_missing: bool = False) -> Settings:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fangde-automation-linux"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fangde API trading workflows with a shared Linux Kafka runner"
 requires-python = ">=3.10"
 dependencies = ["tzdata>=2025.2", "exchange-calendars>=4.11,<5"]

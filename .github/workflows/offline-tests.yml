@@ -3,10 +3,25 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.12']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - run: python -m pip install -e '.[dev,kafka]'
       - run: python -m pytest -q
+      - name: Prepare synthetic deployment
+        run: python -m tests.deployment_smoke prepare "$RUNNER_TEMP"
+      - name: Install from one private file
+        run: ./install.sh "$RUNNER_TEMP/account.deployment.json" --state-dir "$RUNNER_TEMP/private state"
+      - name: Check separate commands without starting either process
+        run: |
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/start.sh" --check
+          "$GITHUB_WORKSPACE/start-monitor.sh" --check
+          systemd-analyze verify "$RUNNER_TEMP/private state/work/systemd/"*.service
+      - name: Verify reinstall preserves renewed credentials and runtime state
+        run: python -m tests.deployment_smoke reinstall "$RUNNER_TEMP"

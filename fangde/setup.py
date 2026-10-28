@@ -61,26 +61,35 @@ def unit_path(value):
     return text.replace("%", "%%")
 
 
-def render_service(settings):
+def render_service(settings, *, component='runner'):
+    if component not in ('runner', 'monitor'):
+        raise ConfigurationError('Service component must be runner or monitor.')
     name = settings.get("service.name", "fangde-runner")
+    if component == 'monitor':
+        name = (name[:-7] if name.endswith('-runner') else name) + '-monitor'
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
         raise ConfigurationError("service.name must contain letters, digits, dots, underscores or hyphens.")
     executable = Path(sys.executable).absolute()
-    log = settings.resolve_path(settings.get("monitor.runnerLog")) if settings.get("monitor.runnerLog") else settings.log_dir / "runner.log"
+    log = (settings.resolve_path(settings.get("monitor.runnerLog")) if settings.get("monitor.runnerLog")
+           else settings.log_dir / 'runner.log') if component == 'runner' else settings.log_dir / 'monitor.log'
     log.parent.mkdir(parents=True, exist_ok=True)
-    text = f"""[Unit]
-Description=Fangde Kafka runner
+    runner_environment = ('Environment=' + unit_quote('FANGDE_RUN_LOG=' + str(log), expand_dollars=False)) if component == 'runner' else ''
+    text = f"""# Managed by Fangde deployment
+[Unit]
+Description=Fangde {component}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory={unit_path(settings.root)}
-ExecStart={unit_quote(executable)} -m fangde.cli --config {unit_quote(settings.path)} runner
+ExecStartPre={unit_quote(executable)} -m fangde.deployment {component} --config {unit_quote(settings.path)} --check
+ExecStart={unit_quote(executable)} -m fangde.cli --config {unit_quote(settings.path)} {component}
 Restart=on-failure
 RestartSec={settings.get('service.restartSeconds', 10)}
+TimeoutStopSec=360
 Environment=PYTHONUNBUFFERED=1
-Environment={unit_quote('FANGDE_RUN_LOG=' + str(log), expand_dollars=False)}
+{runner_environment}
 StandardOutput=append:{unit_path(log)}
 StandardError=append:{unit_path(log)}
 UMask=0077
