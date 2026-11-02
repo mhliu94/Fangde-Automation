@@ -11,7 +11,7 @@ import time
 import uuid
 
 from .api import ApiError, SessionError, TransportError, AuthenticationRequired, TradingApiClient, save_session
-from .diagnostics import command_context, logged_workflow, workflow_attempt, workflow_retry, workflow_step
+from .diagnostics import command_context, command_source_context, logged_workflow, workflow_attempt, workflow_retry, workflow_step
 from .lock import EmulatorLock
 from .orders import OrderAutomation
 
@@ -216,11 +216,13 @@ class WorkflowBase:
                 body["client_request_id"] = request_id
                 record = {"account": self.journal.account, "command_id": key, "fingerprint": fingerprint,
                           "intent": intent, "request": body, "pricing": pricing, "phase": "prepared"}
+                if command_source_context.get() is not None:
+                    record["source"] = dict(command_source_context.get())
                 self.journal.save(key, record)
                 def sent():
                     record.update(phase="dispatched", sent_at=time.time())
                     self.journal.save(key, record)
-                workflow_step("submit")
+                workflow_step("submit", pricing=pricing)
                 try:
                     response = self.client.write("submit", body, before_send=sent)
                     record.update(order_id=order_id(response), phase="accepted")
@@ -231,10 +233,11 @@ class WorkflowBase:
                     self.journal.save(key, record)
                     if record["phase"] == "rejected":
                         raise
-                except AuthenticationRequired:
+                except AuthenticationRequired as error:
+                    record["authentication_error"] = {"message": str(error), **error.diagnostics()}
                     if record.get("sent_at"):
                         record["phase"] = "rejected"
-                        self.journal.save(key, record)
+                    self.journal.save(key, record)
                     raise
                 except (SessionError, ValueError, KeyError, OSError):
                     if record["phase"] == "prepared":

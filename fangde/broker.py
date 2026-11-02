@@ -4,7 +4,7 @@ from decimal import Decimal
 import logging
 from zoneinfo import ZoneInfo
 from .api import ApiError, AuthenticationRequired, TransportError, exact_positive
-from .diagnostics import logged_workflow, workflow_attempt
+from .diagnostics import logged_workflow, workflow_attempt, workflow_step
 from .workflows import (WorkflowBase, OrderUncertain, OrderFailed, OrderJournal, decimal,
                         order_id, ACTIVE, TERMINAL)
 from .orders import OrderAutomation
@@ -52,6 +52,7 @@ def normalize_order(raw, settings):
         "action":side,"order_type":{"PL":"LO","L":"LO","M":"MO"}.get(raw.get("order_type"),"OTHER"),
         "quantity":raw.get("qty"),"price":raw.get("price"),"executed_qty":raw.get("exec_qty"),
         "executed_price":raw.get("exec_price"),"status":status,
+        "awaiting_trigger":strategy and desc in ("待触发","待觸發"),
         "cancelable":str(raw.get("enable_cancel","0"))=="1",
         "submitted_at":broker_time(raw,"create_time",settings),
         "currency":raw.get("currency") or "USD","time_in_force":raw.get("tif"),
@@ -196,12 +197,29 @@ class ApiTrading(WorkflowBase):
         if len(rows)!=1: raise ValueError("No unambiguous US long holding exists for this sell.")
         owned,available=decimal(rows[0].get("qty")),decimal(rows[0].get("avail_sell_qty"))
         pending=Decimal(0)
+        dormant=Decimal(0)
         for order in self._orders():
             if order["counter_id"]!=counter or order["action"]!="2": continue
             if order["status"] not in ACTIVE|TERMINAL: raise ValueError("Unknown sell status prevents an availability check.")
-            if order["status"] in ACTIVE: pending+=max(Decimal(0),decimal(order["quantity"])-decimal(order["executed_qty"]))
-        if decimal(quantity)>max(Decimal(0),min(available,owned-pending)):
-            raise ValueError("Sell exceeds available long shares after pending sells.")
+            if order["status"] in ACTIVE:
+                executed=decimal(order["executed_qty"])
+                remaining=max(Decimal(0),decimal(order["quantity"])-executed)
+                # A strategy explicitly waiting for its trigger has not submitted
+                # a sell. Any broker-side reservation still reduces available.
+                # Normal NotReported orders and strategies with fills still count.
+                if order.get("awaiting_trigger") and executed==0:
+                    dormant+=remaining
+                else:
+                    pending+=remaining
+        effective=max(Decimal(0),min(available,owned-pending))
+        workflow_step("check_sell_availability", sellAvailability={
+            "owned":str(owned),"brokerAvailable":str(available),
+            "pendingSubmitted":str(pending),"awaitingTrigger":str(dormant),
+            "effectiveAvailable":str(effective),
+        })
+        if decimal(quantity)>effective:
+            raise ValueError(f"Sell exceeds available long shares after pending sells: requested={quantity}, "
+                             f"available={effective}, broker_available={available}, pending_submitted={pending}.")
 
     def _prepare(self,symbol,quantity,side,price):
         self._guard_submission()

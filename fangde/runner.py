@@ -12,11 +12,28 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings, execution_backend
-from .diagnostics import command_context, error_detail
+from .diagnostics import command_context, command_source_context, error_detail
 from .lock import EmulatorLock
 from .orders import OrderAutomation
 
 LOG = logging.getLogger("fangde")
+
+
+def command_log_fields(command):
+    """Capture the trading envelope without logging arbitrary message contents."""
+    fields = ("account_id", "command_id", "ts", "type", "symbol", "side", "qty_shares",
+              "limit_price", "notional_usd", "time_in_force", "cancel_unfilled", "trading_enabled")
+    result = {}
+    for key in fields:
+        if key not in command:
+            continue
+        value = command[key]
+        if isinstance(value, str):
+            value = value[:256]
+        elif value is not None and type(value) not in (int, float, bool):
+            value = "<invalid>"
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True)
@@ -285,6 +302,9 @@ class TradingRunner:
             "state": "authentication_required", "account_id": self.settings.get("fangde.accountId"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "message": str(error),
+            "command_id": command_context.get(),
+            "source": command_source_context.get(),
+            **error.diagnostics(),
         })
         self.running = False
         LOG.error("Runner stopped intake: authentication_required. %s", error)
@@ -419,8 +439,12 @@ class TradingRunner:
                 committed = False
                 log_command = True
                 command_token = None
+                source_token = None
+                source = {"topic": command_topic, "partition": message.partition(), "offset": message.offset()}
                 try:
                     command = json.loads(message.value().decode("utf-8"))
+                    if not isinstance(command, dict):
+                        raise ValueError("Kafka command must be a JSON object.")
                     command_id = str(command.get("command_id") or "<missing>")
                     if self.backend == "api" and command_id == "<missing>":
                         command_id = f"kafka:{command_topic}:{message.partition()}:{message.offset()}"
@@ -431,6 +455,10 @@ class TradingRunner:
                         log_command = False
                         consumer.commit(message=message, asynchronous=False)
                         continue
+                    source_token = command_source_context.set(source)
+                    LOG.info("Command received %s", error_detail(json.dumps({
+                        "source": source, "command": command_log_fields(command),
+                    }, separators=(",", ":")), self.settings))
                     if command_is_stale(command, maximum_age):
                         command_outcome, command_reason = "ignored", "stale"
                         command_stage = "commit"
@@ -485,9 +513,9 @@ class TradingRunner:
                     LOG.error("Command processing failed command_id=%s stage=%s error_type=%s error=%r.",
                               command_id, command_stage, type(error).__name__, error_detail(error, self.settings))
                     if isinstance(error, AuthenticationRequired):
-                        # Authentication failed before submission. Close without
-                        # committing this message; a human can restore the session
-                        # and restart. Existing age checks still apply on redelivery.
+                        # Stop intake on unresolved authentication. The journal
+                        # prevents replay if the failure followed dispatch; age
+                        # checks still apply when this message is redelivered.
                         self._authentication_required(error)
                     elif not commit_failed:
                         raise
@@ -500,10 +528,13 @@ class TradingRunner:
                         LOG.info("Command finished %s", json.dumps({
                             "command_id": command_id, "type": command_type, "outcome": command_outcome,
                             "reason": command_reason, "stage": command_stage, "committed": committed,
+                            "source": source,
                             "elapsed_s": round(time.perf_counter() - command_started, 3),
                         }, separators=(",", ":")))
                     if command_token is not None:
                         command_context.reset(command_token)
+                    if source_token is not None:
+                        command_source_context.reset(source_token)
         finally:
             consumer.close()
             producer.flush(5)

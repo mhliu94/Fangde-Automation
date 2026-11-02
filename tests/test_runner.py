@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from fangde.config import Settings
-from fangde.diagnostics import command_context
+from fangde.diagnostics import command_context, command_source_context
 from fangde.errors import SafetyError
 from fangde.lock import EmulatorLock
 from fangde.runner import (
@@ -181,6 +181,8 @@ class RunnerLoopTests(unittest.TestCase):
                 **command,
             }
             message = Mock()
+            message.partition.return_value = 0
+            message.offset.return_value = 123
             message.error.return_value = None
             message.value.return_value = json.dumps(command).encode()
             now = 0
@@ -257,6 +259,27 @@ class RunnerLoopTests(unittest.TestCase):
             consumer.commit.assert_called_once_with(message=message, asynchronous=False)
             consumer.close.assert_called_once_with()
             return events, snapshots, operations
+
+    def test_command_receipt_and_outcome_include_kafka_location_without_extra_payload(self):
+        with self.assertLogs("fangde", level="INFO") as logs:
+            self.run_command({"type": "MARKET_ORDER", "password": "private-extra-field",
+                              "metadata": {"token": "private-nested-field"}})
+        prefix = "Command received "
+        received = [json.loads(record.getMessage()[len(prefix):]) for record in logs.records
+                    if record.getMessage().startswith(prefix)]
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["source"], {"topic": "commands", "partition": 0, "offset": 123})
+        self.assertEqual(received[0]["command"]["qty_shares"], 2)
+        self.assertEqual(self.command_results(logs)[0]["source"], received[0]["source"])
+        self.assertNotIn("private-", "\n".join(logs.output))
+        self.assertIsNone(command_source_context.get())
+
+    def test_stale_command_receipt_is_recorded_without_execution(self):
+        with self.assertLogs("fangde", level="INFO") as logs:
+            _, _, operations = self.run_command({"type": "MARKET_ORDER", "ts": "2026-01-01T00:00:00Z"})
+        self.assertTrue(any(record.getMessage().startswith("Command received ") for record in logs.records))
+        self.assertEqual(self.command_results(logs)[0]["reason"], "stale")
+        self.assertNotIn("market", [call.args[0] for call in operations.call_args_list])
 
 
     def test_unsuccessful_or_unsubmitted_orders_do_not_refresh(self):

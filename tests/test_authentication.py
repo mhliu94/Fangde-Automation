@@ -134,23 +134,68 @@ class AuthenticationTests(unittest.TestCase):
                 'quantity':'1','_reference_price':'1','force_only_rth':'1'}
 
     def test_write_recovers_before_send_then_never_replays_auth_rejection(self):
-        client=self.client((PORTFOLIO,{'status':1101}),(UNLOCK_PATH,unlock()),(PORTFOLIO,ok()),(ADD,{'status':1001}))
+        client=self.client((ACCOUNTS,{'status':1001}),(LOGIN_PATH,login()),(ACCOUNTS,ok()),
+                           (UNLOCK_PATH,unlock()),(ADD,{'status':1001}))
         before=Mock()
-        with self.assertRaises(AuthenticationRequired):client.write('submit',self.ticket(),before_send=before)
+        with self.assertRaises(AuthenticationRequired) as caught:
+            client.write('submit',self.ticket(),before_send=before)
         before.assert_called_once()
+        self.assertEqual(len(self.opener.calls),5)
+        self.assertEqual(caught.exception.diagnostics(),
+                         {'scope':'login','api_code':1001,'http_status':200,'endpoint':ADD})
+        fields=parse_qs(self.opener.calls[-1].data.decode())
+        self.assertEqual(fields['token'],['new-login'])
+        self.assertEqual(fields['tradeToken'],['new-trade'])
+
+    def test_successful_holdings_read_does_not_skip_fresh_trade_unlock(self):
+        client=self.client((PORTFOLIO,ok()),(ACCOUNTS,ok()),(UNLOCK_PATH,unlock()),
+                           (ADD,ok({'order_no':'synthetic-order'})))
+        self.assertTrue(client.read('positions').ok)
+        self.assertEqual(load_session(self.settings.session_path)['session']['trade_token'],'old-trade')
+        def before():
+            self.assertEqual(len(self.opener.calls),3)
+            self.assertEqual(load_session(self.settings.session_path)['session']['trade_token'],'new-trade')
+        marker=Mock(side_effect=before)
+        result=client.write('submit',self.ticket(),before_send=marker)
+        self.assertEqual(result['order_id_str'],'synthetic-order')
+        marker.assert_called_once()
         self.assertEqual(len(self.opener.calls),4)
+        self.assertEqual(parse_qs(self.opener.calls[-1].data.decode())['tradeToken'],['new-trade'])
+
+    def test_each_write_unlocks_even_with_a_token_from_the_previous_write(self):
+        next_unlock=ok({'tradeToken':'next-trade','random_code':''})
+        client=self.client((ACCOUNTS,ok()),(UNLOCK_PATH,unlock()),(ADD,ok({'order_no':'first'})),
+                           (ACCOUNTS,ok()),(UNLOCK_PATH,next_unlock),(ADD,ok({'order_no':'second'})))
+        for identifier in ('first','second'):
+            self.assertEqual(client.write('submit',self.ticket(),before_send=lambda:None)['order_id_str'],identifier)
+        self.assertEqual(parse_qs(self.opener.calls[-1].data.decode())['tradeToken'],['next-trade'])
 
     def test_failed_preflight_does_not_mark_or_dispatch_order(self):
-        client=self.client((PORTFOLIO,{'status':1101}),(UNLOCK_PATH,{'status':1107}))
+        client=self.client((ACCOUNTS,ok()),(UNLOCK_PATH,{'status':1107}),(ACCOUNTS,ok()))
         before=Mock()
-        with self.assertRaises(AuthenticationRequired):client.write('submit',self.ticket(),before_send=before)
+        with self.assertRaises(AuthenticationRequired) as caught:
+            client.write('submit',self.ticket(),before_send=before)
+        self.assertEqual(caught.exception.api_code,1107)
+        self.assertEqual(caught.exception.endpoint,UNLOCK_PATH)
+        with self.assertRaisesRegex(AuthenticationRequired,'earlier password attempt'):
+            client.write('submit',self.ticket(),before_send=before)
+        before.assert_not_called()
+        self.assertEqual(len(self.opener.calls),3)
+        self.assertTrue(load_session(self.settings.session_path)['authentication']['blocked']['trade'])
+
+    def test_preflight_verification_challenge_prevents_submission(self):
+        challenge=unlock();challenge['data']['random_code']='synthetic-challenge'
+        client=self.client((ACCOUNTS,ok()),(UNLOCK_PATH,challenge))
+        before=Mock()
+        with self.assertRaisesRegex(AuthenticationRequired,'additional verification'):
+            client.write('submit',self.ticket(),before_send=before)
         before.assert_not_called()
         self.assertEqual(len(self.opener.calls),2)
 
     def test_uncertain_order_is_never_replayed(self):
-        client=self.client((PORTFOLIO,ok()),(ADD,URLError('lost response')))
+        client=self.client((ACCOUNTS,ok()),(UNLOCK_PATH,unlock()),(ADD,URLError('lost response')))
         with self.assertRaises(TransportError):client.write('submit',self.ticket(),before_send=lambda:None)
-        self.assertEqual(len(self.opener.calls),2)
+        self.assertEqual(len(self.opener.calls),3)
 
     def test_authentication_attempts_are_bounded_on_repeated_expiry(self):
         client=self.client((PORTFOLIO,{'status':1001}),(LOGIN_PATH,login()),(UNLOCK_PATH,unlock()),(PORTFOLIO,{'status':1001}))
@@ -249,10 +294,11 @@ class AuthenticationTests(unittest.TestCase):
 
     def test_cancellation_auth_rejection_is_not_replayed(self):
         path='/trade/index/orderActionCancel'
-        client=self.client((PORTFOLIO,ok()),(path,{'status':1102}))
+        client=self.client((ACCOUNTS,ok()),(UNLOCK_PATH,unlock()),(path,{'status':1102}))
         before=Mock()
         with self.assertRaises(AuthenticationRequired):client.write('withdraw',{'order_id':'synthetic-order'},before_send=before)
-        before.assert_called_once();self.assertEqual(len(self.opener.calls),2)
+        before.assert_called_once();self.assertEqual(len(self.opener.calls),3)
+        self.assertEqual(parse_qs(self.opener.calls[-1].data.decode())['tradeToken'],['new-trade'])
 
     def test_version_three_rejects_other_broker_sharing_a_global_trade_key(self):
         original=state();original['version']=3

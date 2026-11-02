@@ -12,6 +12,7 @@ from functools import wraps
 
 LOG = logging.getLogger("fangde")
 command_context: ContextVar[str | None] = ContextVar("command_id", default=None)
+command_source_context: ContextVar[dict | None] = ContextVar("command_source", default=None)
 _workflow: ContextVar[Workflow | None] = ContextVar("workflow", default=None)
 
 
@@ -97,8 +98,10 @@ def logged_workflow(function):
         try:
             result = function(self, *args, **kwargs)
         except Exception as error:
+            from .api import AuthenticationRequired
+            diagnostics = {"authentication": error.diagnostics()} if isinstance(error, AuthenticationRequired) else {}
             current.emit("finished", logging.ERROR, outcome="failure",
-                         error_type=type(error).__name__, error=error_detail(error, self.settings))
+                         error_type=type(error).__name__, error=error_detail(error, self.settings), **diagnostics)
             if LOG.isEnabledFor(logging.DEBUG):
                 LOG.debug("Workflow failure traceback: %s", error_detail(
                     "".join(traceback.format_exception(type(error), error, error.__traceback__)), self.settings,

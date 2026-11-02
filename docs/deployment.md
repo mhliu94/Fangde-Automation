@@ -194,7 +194,14 @@ systemctl --user enable --now fangde-FANGDE-A-runner.service
 ```
 
 `--systemd` writes both units and reloads the user manager; it does not enable or
-start either service. Unit names use the exported account ID. To start the monitor
+start either service. Unit names use the exported account ID. Once installed,
+start the runner with this one-line command (replace `FANGDE-A` with your account ID):
+
+```bash
+systemctl --user start fangde-FANGDE-A-runner.service
+```
+
+This preserves the saved trading-enabled state. To start the monitor
 separately, after configuring its password and TLS files:
 
 ```bash

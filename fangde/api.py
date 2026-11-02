@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from urllib.request import Request
 from . import legacy_holdings as fd
 from .lock import EmulatorLock
+from .diagnostics import workflow_step
 HOST = "https://apitrade.techfx88.com"
 READ_PATHS = {
     "orders": ("GET", "/trade/index/todayOrder"),
@@ -35,10 +36,17 @@ class SessionError(RuntimeError):
 class AuthenticationRequired(SessionError):
     """Human verification or replacement account credentials are required."""
 
-    def __init__(self, message, *, scope="unknown", api_code=None):
+    def __init__(self, message, *, scope="unknown", api_code=None, http_status=None, endpoint=None):
         super().__init__(message)
         self.scope = scope
         self.api_code = api_code
+        self.http_status = http_status
+        self.endpoint = endpoint
+
+    def diagnostics(self):
+        """Only protocol metadata, never response bodies or credentials."""
+        return {"scope": self.scope, "api_code": self.api_code,
+                "http_status": self.http_status, "endpoint": self.endpoint}
 
 
 class TransportError(SessionError):
@@ -148,7 +156,9 @@ class ApiClient:
             status=error.code
             error.close()
             if status in (401,403):
-                raise AuthenticationRequired("Fangde requires authentication. Unlock on the phone and export a fresh session.") from None
+                raise AuthenticationRequired(
+                    f"Fangde authentication failed (HTTP {status}, endpoint {path}).",
+                    http_status=status, endpoint=path) from None
             raise TransportError(f"Fangde HTTP {status}; no automatic write retry.") from None
         except (URLError,TimeoutError,OSError,http.client.HTTPException):
             raise TransportError("Fangde network failure; reconcile submitted requests before retrying.") from None
@@ -161,8 +171,9 @@ class ApiClient:
         if code in (1001,1101,1102,1107,1401,401,403) or (code and re.search(r"登录|登錄|交易密码|交易密碼|验证码|驗證碼|token|session|authentication",
             str(result.get("info") or result.get("message") or ""),re.I)):
             scope = "login" if code == 1001 else "trade" if code in (1101,1102) else "unknown"
-            raise AuthenticationRequired("Fangde requires a fresh authenticated session from the phone.",
-                                         scope=scope, api_code=code)
+            raise AuthenticationRequired(
+                f"Fangde authentication failed (code {code}, scope {scope}, endpoint {path}).",
+                scope=scope, api_code=code, http_status=200, endpoint=path)
         value=ApiResult(path,200,code,(time.monotonic()-start)*1000,stamp,fd.redact(result,(token,trade)))
         if not value.ok: raise ApiError(value)
         if "data" not in value.payload: raise TransportError("Fangde success response is missing data.")
@@ -238,11 +249,17 @@ class TradingApiClient(ApiClient):
         else: raise ValueError("Unsupported Fangde write operation.")
         with self._session() as state:
             if 'authentication' in state:
-                # Restore credentials using a read before the durable send marker.
-                # Once a submit/cancel is dispatched it is never replayed here.
-                self._read_authenticated(state,*READ_PATHS['positions'],{'force':'1'},needs_trade=True)
+                # Holdings can succeed without validating the saved trading token.
+                # Verify/renew login, then explicitly unlock trading for this write.
+                # Keep both steps before the durable send marker; never replay a write.
+                from .authentication import PasswordAuthentication
+                workflow_step("validate_login")
+                self._read_authenticated(state,*READ_PATHS['accounts'],{},needs_trade=False)
+                workflow_step("unlock_trading")
+                PasswordAuthentication(self.settings,self.opener).renew(state,'trade')
             if not state["session"].get("trade_token"):
                 raise AuthenticationRequired("Unlock trading in Fangde and export the trading token first.")
+            workflow_step("submit" if operation=="submit" else "cancel")
             before_send()
             data=self._send(state,"POST",path,fields).payload["data"]
             if operation=="submit":

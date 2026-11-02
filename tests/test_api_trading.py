@@ -109,10 +109,16 @@ class TradingTests(unittest.TestCase):
     def test_authentication_failure_stops_workflow_and_does_not_leave_ambiguous_ticket(self):
         def rejected(name,body,*,before_send):
             before_send()
-            raise AuthenticationRequired('Renew on phone')
+            raise AuthenticationRequired('Trading authorization rejected',scope='trade',api_code=1102,
+                                         http_status=200,endpoint='/trade/index/orderActionAdd')
         self.broker.write=rejected
         with self.assertRaises(AuthenticationRequired):self.trading.limit_order('BIYA','2.28','2','Buy')
-        self.assertEqual(self.trading.journal.read('test-command')['phase'],'rejected')
+        record=self.trading.journal.read('test-command')
+        self.assertEqual(record['phase'],'rejected')
+        self.assertEqual(record['authentication_error']['api_code'],1102)
+        self.assertEqual(record['authentication_error']['scope'],'trade')
+        with self.assertRaisesRegex(ValueError,'previously rejected'):
+            self.trading.limit_order('BIYA','2.28','2','Buy')
 
     def test_operator_reconciliation_matches_intent_without_resubmitting(self):
         self.broker.fail_submit=True
@@ -169,6 +175,53 @@ class TradingTests(unittest.TestCase):
 
     def test_sell_availability_prevents_shorting(self):
         with self.assertRaises(ValueError):self.trading.limit_order('BIYA','2.28','9','Sell')
+        self.assertEqual(self.writes('submit'),[])
+
+    def test_untriggered_pdd_strategy_does_not_block_premarket_sell(self):
+        self.broker.positions['products'][0].update(symbol='PDD',qty='20',avail_sell_qty='20')
+        self.broker.orders['strategy-pdd']=raw_order(order_no='strategy-pdd',symbol='PDD',
+            bs_flag='S',qty='20',order_type='3',is_strategy='1',order_status='0',order_status_desc='待触发')
+        with patch('fangde.broker.market_session',return_value='premarket'), self.assertLogs('fangde') as logs:
+            result=self.trading.market_order('PDD','2','Sell')
+        self.assertTrue(result['submitted'])
+        self.assertEqual(result['pricing']['tradingSession'],'premarket')
+        self.assertEqual(self.writes('submit')[0][2]['force_only_rth'],'2')
+        self.assertEqual(self.writes('withdraw'),[])
+        self.assertIn('"awaitingTrigger":"20"','\n'.join(logs.output))
+
+    def test_untriggered_strategy_still_respects_broker_reservations(self):
+        self.broker.positions['products'][0].update(qty='20',avail_sell_qty='0')
+        self.broker.orders['strategy']=raw_order(order_no='strategy',bs_flag='S',qty='20',
+            order_type='3',is_strategy='1',order_status='0',order_status_desc='待触发')
+        with self.assertRaisesRegex(ValueError,'broker_available=0'):
+            self.trading.limit_order('BIYA','2.28','2','Sell')
+        self.assertEqual(self.writes('submit'),[])
+
+    def test_normal_unreported_sell_is_still_reserved(self):
+        self.broker.positions['products'][0].update(qty='20',avail_sell_qty='20')
+        self.broker.orders['normal']=raw_order(order_no='normal',bs_flag='S',qty='20',
+            order_type='PL',order_status='0',order_status_desc='未报')
+        with self.assertRaisesRegex(ValueError,'pending_submitted=20'):
+            self.trading.limit_order('BIYA','2.28','2','Sell')
+        self.assertEqual(self.writes('submit'),[])
+
+    def test_submitted_sell_reserves_shares_alongside_dormant_strategy(self):
+        self.broker.positions['products'][0].update(qty='20',avail_sell_qty='20')
+        self.broker.orders['strategy']=raw_order(order_no='strategy',bs_flag='S',qty='20',
+            order_type='3',is_strategy='1',order_status='0',order_status_desc='待觸發')
+        self.broker.orders['normal']=raw_order(order_no='normal',bs_flag='S',qty='20',exec_qty='1',
+            order_status='7',order_status_desc='部分成交')
+        with self.assertRaisesRegex(ValueError,'pending_submitted=19'):
+            self.trading.limit_order('BIYA','2.28','2','Sell')
+        self.assertEqual(self.writes('submit'),[])
+
+    def test_strategy_with_fills_or_unknown_status_cannot_bypass_share_check(self):
+        self.broker.positions['products'][0].update(qty='20',avail_sell_qty='20')
+        for description in ('待触发','部分成交','unknown'):
+            with self.subTest(description=description):
+                self.broker.orders['strategy']=raw_order(order_no='strategy',bs_flag='S',qty='20',exec_qty='1',
+                    order_type='3',is_strategy='1',order_status='7',order_status_desc=description)
+                with self.assertRaises(ValueError):self.trading.limit_order('BIYA','2.28','2','Sell')
         self.assertEqual(self.writes('submit'),[])
 
     def test_fractional_quantity_rejected(self):

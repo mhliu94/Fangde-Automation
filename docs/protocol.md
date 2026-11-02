@@ -38,6 +38,14 @@ are mapped explicitly; their numeric codes are not interpreted as normal-order
 codes. Known normal statuses and returned descriptions are normalized before
 mapping to KTrader. An unfamiliar detail status blocks financial follow-up.
 
+For long-sell availability, a strategy explicitly marked `待触发` / `待觸發`
+(awaiting trigger), with zero executed quantity, is not counted as a submitted
+sell. It remains visible and cancelable according to its broker flags. The check
+still caps new sells by both `avail_sell_qty` and owned shares minus outstanding
+submitted sells. If Fangde reserves shares for a dormant strategy, its reduced
+`avail_sell_qty` is still honored. Normal unreported orders, partially filled
+strategies and unknown statuses do not receive this exception.
+
 Fangde responses include Hong Kong broker time and sometimes a New York-local
 timestamp. The adapter prefers the explicit New York-local fields; otherwise it
 uses `api.brokerTimezone` (Asia/Hong_Kong). UTC output retains the creation time.
@@ -61,7 +69,11 @@ PKCS#1 v1.5 padding; the phone signing seed and current timestamp produce each
 login signature. Encoded passwords remain password-equivalent secrets.
 
 Login expiry (`1001`) and trade unlock requirements (`1101`, `1102`) are distinct.
-Recovery is bounded per read. Auth failures latch locally; explicit retry is
+Recovery is bounded per read. Password-enabled writes validate login using the
+account endpoint and explicitly unlock trading before the durable dispatch marker.
+They do not rely on holdings to validate a cached trading token. Authentication
+errors retain numeric broker/HTTP codes, scope and endpoint without response bodies
+or credentials. Auth failures latch locally; explicit retry is
 required after a failed/interrupted password request. Financial requests never
 replay automatically. Main/trade password authentication was checked from Windows;
 Linux network access, longevity, and concurrent phone/server behavior remain to

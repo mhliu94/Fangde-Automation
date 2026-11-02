@@ -20,8 +20,25 @@ to send the operation. `--dry-run` and `--no-submit` remain preview aliases for
 compatibility. `--kill` requests the emulated FOK workflow. Prices and symbols
 above are illustrative, not suggested trades.
 
-Password-enabled sessions recover automatically during reads and before financial
-dispatch. `session-authenticate` forces login/unlock explicitly; add `--retry` only
+US premarket and after-hours trading is enabled by default through
+`api.extendedHoursMarketOrders: true`. During premarket (04:00–09:30 New York)
+and after-hours (normally 16:00–20:00), `MARKET_ORDER` and `market-order` become
+DAY limit orders using the fresh Kafka offers for buys or bids for sells.
+The ticket sends Fangde's `extended_trading=1`. A converted market command can
+remain unfilled if prices move away from its limit; it is not a broker market order.
+Explicit limits, including emulated FOK, also set the extended-hours flag.
+Regular-session market commands remain broker market orders.
+
+The calendar handles DST, holidays and early closes. After an early close,
+the supported after-hours window ends four hours after that close, capped at
+20:00 New York. Overnight market commands remain unsupported. No extra Kafka
+field or CLI switch is needed for premarket/after-hours conversion; setting
+`api.extendedHoursMarketOrders` to `false` disables that conversion.
+
+Password-enabled sessions recover automatically during reads. Before each order
+or cancellation, the client validates login and performs a fresh trading-password
+unlock, even when holdings reads succeed with a saved trading token.
+`session-authenticate` forces login/unlock explicitly; add `--retry` only
 after investigating an earlier failed/interrupted password attempt. Neither form
 submits or cancels an order. Set passwords with `python -m fangde.password_setup
 --session /private/account.session.json` using masked local prompts.
@@ -58,6 +75,20 @@ timestamps are rejected by the default five-minute command age rule. Use a uniqu
 `command_id` for each intent. The same ID with the same completed order returns
 its recorded result; changing its order parameters is rejected. If no ID is
 provided, the runner derives one from topic/partition/offset.
+
+For troubleshooting, `Command received` logs the trading fields and the Kafka
+topic, partition and offset, excluding arbitrary extra message fields.
+`Command finished` retains that Kafka location, outcome and commit decision.
+Prepared order journals also retain the command's Kafka location and the selected
+price-book location. Authentication failures identify `validate_login`,
+`unlock_trading` or `submit`, plus the broker code and endpoint; workflow logs
+include the prepared trading session, effective type and price.
+Share-availability logs distinguish submitted sells from strategies awaiting
+their trigger. If authentication cannot be recovered, the runner stops intake and
+exits with `authentication_required` in `runner-status`, including the failed
+command ID and Kafka location. A successful holdings read does not verify trading
+authorization. Restore it using `session-authenticate` before restarting the runner;
+the journal prevents replay of a previously dispatched, rejected command.
 
 A `SET_TRADING_ENABLED` command uses the same account/ID/timestamp envelope plus
 `"trading_enabled": true` or `false`. Enabling persists across restarts. The

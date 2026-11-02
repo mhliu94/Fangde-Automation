@@ -69,17 +69,24 @@ validation. CI checks Linux installation and local startup prerequisites using
 synthetic credentials. The offline suite covers transport, account binding, status mapping,
 partial fills, uncertain submissions, cancellation races, command handling,
 price books, outbox recovery, and command-center HTTP authentication.
+Extended-hours regressions exercise Kafka command routing through the signed
+Fangde form for buys, sells and explicit limits, including fresh trading unlock,
+DST/session boundaries, and authentication failures without automatic replay.
 
 Password login and trading unlock were verified live on 2026-10-27, followed by
 holdings reads. A password-enabled export lets Linux recover a rejected login
 and unlock a missing/expired trading session. It uses password authentication;
 no Fangde refresh-token mechanism is assumed. SMS verification is outside scope.
 
-Reads can resume after successful recovery. Order submission/cancellation first
-checks authentication with a holdings read; a dispatched order or cancellation
-is never automatically replayed. A failed/interrupted password attempt is latched
+Reads can resume after successful recovery. For password-enabled sessions, order
+submission/cancellation first validates login with an account read, then obtains
+a fresh trading token through password unlock. A holdings read alone does not
+establish trading authorization. A dispatched order or cancellation is never
+automatically replayed. A failed/interrupted password attempt is latched
 to prevent repeated attempts. The runner then reports `authentication_required`.
 After correcting credentials, explicitly retry or import a fresh export.
+Authentication failures retain the broker code, scope and endpoint in logs and
+runner state, and in the order journal when a ticket has been prepared.
 
 The private export contains password-equivalent values as well as tokens and
 device headers. Base64 is not encryption. Password setup upgrades the account

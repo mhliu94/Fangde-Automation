@@ -126,7 +126,8 @@ class PasswordAuthentication:
         except HTTPError as error:
             status=error.code
             error.close()
-            raise AuthenticationRequired(f"Password authentication failed with HTTP {status}; automatic attempts stopped.") from None
+            raise AuthenticationRequired(f"Password authentication failed with HTTP {status}; automatic attempts stopped.",
+                                         http_status=status, endpoint=path) from None
         except (URLError,TimeoutError,OSError,http.client.HTTPException):
             raise AuthenticationRequired("Password authentication had a network failure; automatic attempts stopped.") from None
         if len(raw)>maximum:
@@ -138,7 +139,9 @@ class PasswordAuthentication:
             raise AuthenticationRequired("Authentication returned an unsupported response.")
         code=int(result['status'])
         if code!=0:
-            raise AuthenticationRequired(f"Password authentication was rejected (code {code}); automatic attempts stopped.",api_code=code)
+            scope = 'login' if code == 1001 else 'trade' if code in (1101,1102) else 'unknown'
+            raise AuthenticationRequired(f"Password authentication was rejected (code {code}, endpoint {path}); automatic attempts stopped.",
+                                         scope=scope, api_code=code, http_status=200, endpoint=path)
         data=result.get('data')
         if not isinstance(data,dict):
             raise AuthenticationRequired("Authentication success response is missing data.")

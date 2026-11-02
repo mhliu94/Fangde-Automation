@@ -24,6 +24,8 @@ class AuthenticationIntakeTests(unittest.TestCase):
                               "consumerGroupId": "account-a"}}, root / "config.json", root)
                 runner = TradingRunner(settings)
                 message = Mock()
+                message.partition.return_value = 0
+                message.offset.return_value = 123
                 message.error.return_value = None
                 message.value.return_value = json.dumps({"type": "MARKET_ORDER", "account_id": "account-a",
                     "command_id": "test", "ts": datetime.now(timezone.utc).isoformat(), "symbol": "BIYA", "side": "Buy", "qty_shares": 1}).encode()
@@ -32,7 +34,8 @@ class AuthenticationIntakeTests(unittest.TestCase):
                 kafka = SimpleNamespace(Consumer=Mock(return_value=consumer), Producer=Mock(return_value=FakeProducer()), KafkaException=RuntimeError)
                 def operation(kind, arguments):
                     if kind == failure_stage:
-                        raise AuthenticationRequired("Phone verification required in the app.")
+                        raise AuthenticationRequired("Phone verification required in the app.",api_code=1107,
+                                                     http_status=200,endpoint='/trade/index/orderActionAdd')
                     return {"positions": []}
                 with patch.dict(sys.modules, {"confluent_kafka": kafka}), patch("fangde.runner.signal.signal"), \
                      patch.object(runner, "_operation", side_effect=operation), self.assertLogs("fangde", level="ERROR"):
@@ -43,6 +46,12 @@ class AuthenticationIntakeTests(unittest.TestCase):
                 status = runner_status(settings)
                 self.assertFalse(status["running"])
                 self.assertEqual(status["state"], "authentication_required")
+                self.assertEqual(status["api_code"],1107)
+                self.assertEqual(status["http_status"],200)
+                self.assertEqual(status["endpoint"],'/trade/index/orderActionAdd')
+                self.assertEqual(status["command_id"],"test" if failure_stage=="market" else None)
+                self.assertEqual(status["source"],
+                                 {"topic":"commands","partition":0,"offset":123} if failure_stage=="market" else None)
                 self.assertTrue(FangdeController(settings).script_status()["authentication_required"])
 
 

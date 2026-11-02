@@ -1,5 +1,52 @@
 # Validation record
 
+## Premarket investigation and regression coverage — 2026-11-02
+
+- Saved runner logs show a `MARKET_ORDER` to sell 100 AEHL received on
+  2026-10-28 at 12:25:43 UTC (08:25:43 New York). The saved order journal records
+  conversion to a DAY limit sell at USD 7.30 with `force_only_rth=2`, which the
+  transport maps to `extended_trading=1`.
+- Its reference was selected from `price-books`, partition 0, offset 95033967,
+  with timestamp 1793190329387303168 ns. The journal records 119 shares of visible
+  depth across four levels; this reference was within the five-minute age limit.
+- At 12:25:55 UTC the submit request returned `AuthenticationRequired`. The
+  journal has a dispatch timestamp, phase `rejected`, and no broker order ID.
+  The runner stopped without committing that Kafka command. The original logs
+  did not retain the broker authentication code or raw Kafka command bytes, so
+  they cannot establish the exact authentication cause or original command offset.
+- A separate sell of 2 PDD at 12:13:19 UTC was blocked before submission by the
+  available-long-share guard. The saved PDD strategy snapshot shows 20 shares,
+  zero fills and `待触发` (awaiting trigger). The guard incorrectly counted that
+  dormant strategy as a submitted sell. It now excludes only explicitly dormant,
+  unfilled strategies while retaining the broker's available-share cap and all
+  submitted-order reservations. The runner continued until the AEHL auth failure
+  roughly 12 minutes later; the log contains no unhandled crash traceback.
+- PDD is absent from the saved price-book cache and the nearby refresh logs.
+  A fresh PDD feed is still required before a PDD market command can be priced.
+- The existing authentication correction validates login and obtains a fresh
+  trading token before every financial write. New offline regressions reconstruct
+  the AEHL intent using synthetic credentials, books and HTTP responses, then
+  verify the signed extended-hours form, fresh token, journal, and duplicate guard.
+  They also cover after-hours, both sides, explicit limits/emulated FOK, DST,
+  holidays, early closes, stale books, and failures at unlock versus submission.
+- Command logs now retain topic/partition/offset and trading fields; journals
+  retain command location alongside price-book provenance. Workflow failures
+  retain pricing context and structured authentication diagnostics.
+- Validation: **226 tests passed**, plus 310 passing subtests, after network/socket
+  access was enabled. This includes the four dashboard HTTP tests blocked during
+  the initial sandboxed run. Local startup validation, CLI self-test and
+  `git diff --check` passed. An earlier read-only Kafka metadata attempt failed
+  under the network restriction with transport code -195; it did not join the
+  runner group or commit offsets.
+- The managed runner systemd unit was reinstalled and the user manager reloaded.
+  `systemd-analyze --user verify` passed. Its existing enabled state and user
+  lingering were preserved; the service remains inactive until explicitly started.
+- Live Kafka/broker verification remains pending. The saved runner state is still
+  `authentication_required`; the historical order has not been replayed.
+  Overnight support is outside this change.
+
+## Earlier validation
+
 Updated on 2026-10-27 for version 0.3.0.
 
 - Offline regression, including the preserved legacy holdings scripts:
