@@ -1,3 +1,4 @@
+import copy
 import json
 import sys
 import tempfile
@@ -145,8 +146,94 @@ class RunnerTests(unittest.TestCase):
                 FakeProducer(report=False), "account-details", snapshot
             )
 
+    def test_holdings_publish_only_changed_data_and_retry_failed_delivery(self):
+        runner = TradingRunner(self.settings())
+        producer = FakeProducer()
+        snapshot = holdings_snapshot({
+            "cash": {"balances": [{"currency": "USD", "balance": "100"}]},
+            "positions": [{"symbol": "AAPL", "quantity": "2", "cost": "10"},
+                          {"symbol": "MSFT", "quantity": "1", "cost": "20"}],
+        }, runner.settings, True)
+        with patch.object(producer, "produce", wraps=producer.produce) as produce:
+            self.assertIsNotNone(runner._publish_holdings(producer, "details", snapshot))
+            reordered = dict(snapshot, ts="2026-11-05T12:00:00Z", positions=list(reversed(snapshot["positions"])))
+            self.assertIsNone(runner._publish_holdings(producer, "details", reordered))
+            produce.assert_called_once()
+            producer.error = "delivery failure"
+            changed = dict(snapshot, cash=90)
+            with self.assertRaises(RuntimeError):
+                runner._publish_holdings(producer, "details", changed)
+            producer.error = None
+            self.assertIsNotNone(runner._publish_holdings(producer, "details", changed))
+            self.assertIsNone(runner._publish_holdings(producer, "details", changed))
+            self.assertEqual(produce.call_count, 3)
+
+    def test_all_account_fields_trigger_publication_and_restart_sends_baseline(self):
+        baseline = holdings_snapshot({"positions": [{"symbol": "AAPL", "quantity": 2, "cost": 10}]},
+                                     self.settings(), True)
+        changes = [dict(baseline, cash=1), dict(baseline, cash_by_currency={"HKD": 10}),
+                   dict(baseline, trading_enabled=False), dict(baseline, positions=[])]
+        for field in ("qty", "avg_price", "marketPrice", "marketValue", "dailyPL", "dailyPLPercent"):
+            changed = copy.deepcopy(baseline)
+            changed["positions"][0][field] = 123
+            changes.append(changed)
+        for changed in changes:
+            with self.subTest(changed=changed):
+                runner = TradingRunner(self.settings())
+                producer = FakeProducer()
+                runner._publish_holdings(producer, "details", baseline)
+                self.assertIsNotNone(runner._publish_holdings(producer, "details", changed))
+                self.assertIsNone(runner._publish_holdings(producer, "details", changed))
+                self.assertIsNotNone(TradingRunner(runner.settings)._publish_holdings(producer, "details", changed))
+
 
 class RunnerLoopTests(unittest.TestCase):
+    def test_one_second_polling_checks_orders_even_when_holdings_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings({"fangde": {"accountId": "A"}, "kafka": {
+                "bootstrapServers": "unused", "commandTopic": "commands",
+                "accountDetailsTopic": "details", "consumerGroupId": "test",
+                "pollTimeoutSeconds": 30,
+            }}, root / "config.json", root)
+            runner = TradingRunner(settings)
+            now = 0.0
+            starts = []
+            waits = []
+            def operation(kind, arguments):
+                nonlocal now
+                if kind == "recover":
+                    return {}
+                starts.append(now)
+                now += 0.2
+                return {"positions": [], "orders": [{"observation": len(starts)}],
+                        "queriedAt": datetime.fromtimestamp(now, timezone.utc).isoformat()}
+            def poll(timeout):
+                nonlocal now
+                waits.append(timeout)
+                now += timeout
+                if len(starts) == 3:
+                    runner.running = False
+                return None
+            producer = FakeProducer()
+            consumer = Mock()
+            consumer.poll.side_effect = poll
+            kafka = SimpleNamespace(Consumer=Mock(return_value=consumer), Producer=Mock(return_value=producer),
+                                    KafkaException=RuntimeError)
+            with patch.dict(sys.modules, {"confluent_kafka": kafka}), patch("fangde.runner.signal.signal"), \
+                 patch("fangde.runner.time.monotonic", side_effect=lambda: now), \
+                 patch.object(runner, "_operation", side_effect=operation), \
+                 patch.object(runner, "_publish_orders") as orders, \
+                 patch.object(producer, "produce", wraps=producer.produce) as publish:
+                runner.run()
+            self.assertEqual(starts, [0, 1, 2])
+            for wait in waits:
+                self.assertAlmostEqual(wait, 0.8)
+            self.assertEqual(orders.call_count, 3)
+            self.assertEqual([call.args[1] for call in orders.call_args_list],
+                             [[{"observation": n}] for n in (1, 2, 3)])
+            publish.assert_called_once()
+
     @staticmethod
     def command_results(logs):
         prefix = "Command finished "
@@ -289,7 +376,7 @@ class RunnerLoopTests(unittest.TestCase):
                 self.assertEqual(len(snapshots), 1)
                 self.assertEqual(events.count("holdings"), 1)
 
-    def test_api_post_action_delay_includes_cancel_and_acknowledged_failures(self):
+    def test_api_post_action_refresh_includes_cancel_and_acknowledged_failures(self):
         from fangde.api_trading import OrderUncertain
         for kind, operation, result in (
             ("MARKET_ORDER", "market", None),
@@ -301,13 +388,13 @@ class RunnerLoopTests(unittest.TestCase):
             with self.subTest(kind=kind, result=result):
                 events, _, _ = self.run_command({"type": kind}, backend="api", result=result)
                 self.assertEqual(events, ["recover", "holdings", "publish", "poll", operation,
-                    "commit", ("sleep", 2), "holdings", "publish", "poll"])
+                    "commit", "holdings", "publish", "poll"])
 
-    def test_api_delayed_publication_resets_periodic_interval_from_delivery(self):
+    def test_periodic_interval_is_measured_from_query_start(self):
         events, snapshots, _ = self.run_command({"type": "MARKET_ORDER"}, backend="api",
-            query_seconds=4, delivery_seconds=2, holdings_interval=30, later_polls=(47, 48))
+            query_seconds=4, delivery_seconds=2, holdings_interval=30, later_polls=(39, 40))
         self.assertEqual(events, ["recover", "holdings", "publish", "poll", "market", "commit",
-            ("sleep", 2), "holdings", "publish", "poll", "poll", "holdings", "publish", "poll"])
+            "holdings", "publish", "poll", "poll", "holdings", "publish", "poll"])
         self.assertEqual(len(snapshots), 3)
 
 

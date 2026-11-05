@@ -102,8 +102,18 @@ Insufficient visible depth uses the outermost available level, so partial fills
 remain possible. The cache refreshes every 30 seconds by default, rejects
 future-dated/inconsistent books, and enforces a maximum age of five minutes.
 
-Holdings are published at startup, after completed order/cancel handling, and
-every 30 seconds measured from the preceding update's completion. The account
+Orders, positions and cash are polled at startup and every second by default
+(`kafka.holdingsIntervalSeconds`), measured from each query's start. Slow broker
+requests, Kafka delivery and serialized command execution can extend the cadence;
+polls never overlap or accumulate. Completed order/cancel handling triggers an
+immediate refresh, with no default post-order delay. Existing installations must
+set `kafka.holdingsIntervalSeconds` to `1` and `api.postOrderPublishDelaySeconds`
+to `0` if their configuration explicitly overrides these defaults.
+
+Account details are published on startup and whenever cash, positions (including
+prices and P/L), or trading-enabled state changes. Observation timestamps and
+position ordering alone do not cause publication. A failed delivery does not
+advance the last-published state and is retried on the next poll. The account
 payload preserves GigaMoney's `account_id`, `account_num_id`, `cash`,
 `cash_by_currency`, `positions`, `ts`, and `trading_enabled` fields.
 

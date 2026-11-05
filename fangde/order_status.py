@@ -247,7 +247,8 @@ class OrderStatusPublisher:
                 except Exception as error:
                     failed += 1
                     LOG.error("Pending order publication failed error_type=%s; record retained.", type(error).__name__)
-        LOG.info("Order status publication completed delivered=%d failed=%d observed=%d.", sent, failed, len(snapshots))
+        LOG.log(logging.INFO if sent or failed else logging.DEBUG,
+                "Order status publication completed delivered=%d failed=%d observed=%d.", sent, failed, len(snapshots))
         if failed:
             raise RuntimeError(f"Order status publication failed for {failed} order(s); pending snapshots retained.")
         return sent

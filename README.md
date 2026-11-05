@@ -47,7 +47,7 @@ for creating the bundle on Windows, updates and separate systemd services.
 | Cancellation | One exact order number or all currently active, cancelable US orders |
 | Today's orders | Fangde's today endpoint; retains broker-listed carryover/strategy orders |
 | History | Optional date-range query with complete pagination |
-| Kafka | Commands, periodic/post-order account snapshots, cached price books |
+| Kafka | Commands, one-second account/order polling with publication on change, cached price books |
 | Order status | KTrader v1 snapshots, exact string IDs, durable acknowledged outbox |
 | Command center | HTTPS login, CSRF protection, runner start/stop, logs and machine health |
 | Operations | Session inspection/import, account binding, persistent order journal, systemd unit rendering |

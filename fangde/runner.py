@@ -177,6 +177,7 @@ class TradingRunner:
         self.backend = execution_backend(settings)
         self.api_executor = None
         self.order_publisher = None
+        self._published_holdings_state = None
         self.state_path = settings.work_dir / "trading-state.json"
         self.stop_path = settings.work_dir / "runner.stop"
         self.pid_path = settings.work_dir / "runner.pid.json"
@@ -275,6 +276,20 @@ class TradingRunner:
 
         return self.order_publisher.publish(snapshots, deliver)
 
+    def _publish_holdings(self, producer, topic, snapshot):
+        # Observation times and broker row ordering are not account changes.
+        state = {key: value for key, value in snapshot.items() if key != "ts"}
+        state["positions"] = sorted(state["positions"], key=lambda row: json.dumps(row, sort_keys=True))
+        fingerprint = json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if fingerprint == self._published_holdings_state:
+            return None
+        result = self._publish_snapshot(producer, topic, snapshot,
+            timeout=float(self.settings.get("kafka.deliveryTimeoutSeconds", 10)))
+        # Only acknowledged data may suppress a future publication. A failed
+        # send retries on the next poll; a restart publishes a fresh baseline.
+        self._published_holdings_state = fingerprint
+        return result
+
     def run(self, *, live: bool = False) -> None:
         # Prevent an Android and API runner (or two API runners) from consuming
         # simultaneously and overwriting each other's PID/command state.
@@ -322,7 +337,7 @@ class TradingRunner:
         command_topic = str(self.settings.require("kafka.commandTopic"))
         details_topic = str(self.settings.require("kafka.accountDetailsTopic"))
         group = str(self.settings.require("kafka.consumerGroupId"))
-        interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 30))
+        interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 1))
         poll_seconds = float(self.settings.get("kafka.pollTimeoutSeconds", 1))
         maximum_age = float(self.settings.get("kafka.maxCommandAgeSeconds", 300))
         commit_failed = bool(self.settings.get("kafka.commitFailedCommands", True))
@@ -354,25 +369,28 @@ class TradingRunner:
         holdings_trigger = "startup"
         holdings_command_id = None
         holdings_order_started = None
-        LOG.info("Runner started for account_id=%s topic=%s backend=%s.", account_id, command_topic, self.backend)
+        LOG.info("Runner started for account_id=%s topic=%s backend=%s holdings_interval_s=%g publish_on_change=true.",
+                 account_id, command_topic, self.backend, interval)
         try:
             while self.running and not self.stop_path.exists():
                 now = time.monotonic()
                 if now >= next_holdings:
+                    poll_started = now
                     holdings_started = time.perf_counter()
                     holdings_stage = "query"
                     holdings_token = command_context.set(holdings_command_id)
-                    LOG.info("Position update started trigger=%s command_id=%s.",
+                    LOG.debug("Position update started trigger=%s command_id=%s.",
                              holdings_trigger, holdings_command_id)
                     try:
                         if self.backend == "api" and holdings_trigger == "post_order":
                             holdings_stage = "post_order_delay"
-                            delay = float(self.settings.get("api.postOrderPublishDelaySeconds", 2))
-                            LOG.info("Waiting %g seconds before post-order holdings query command_id=%s.",
-                                     delay, holdings_command_id)
+                            delay = float(self.settings.get("api.postOrderPublishDelaySeconds", 0))
                             # Wait before querying so the published snapshot is fresh.
                             # This stays after the command commit and before the next poll.
-                            time.sleep(delay)
+                            if delay:
+                                LOG.info("Waiting %g seconds before post-order holdings query command_id=%s.",
+                                         delay, holdings_command_id)
+                                time.sleep(delay)
                             holdings_stage = "query"
                         holdings = self._operation("holdings", {})
                         if self.backend == "api":
@@ -393,18 +411,19 @@ class TradingRunner:
                         snapshot = holdings_snapshot(holdings, self.settings, trading_enabled)
                         holdings_stage = "publish"
                         publish_started = time.perf_counter()
-                        partition, offset = self._publish_snapshot(producer, details_topic, snapshot,
-                            timeout=float(self.settings.get("kafka.deliveryTimeoutSeconds", 10)))
-                        LOG.info(
-                            "Published holdings with %d positions to partition=%d offset=%d. "
-                            "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
-                            "order_to_update_s=%s next_interval_s=%g",
-                            len(snapshot["positions"]), partition, offset,
-                            holdings_trigger, holdings_command_id, time.perf_counter() - holdings_started,
-                            time.perf_counter() - publish_started,
-                            round(time.perf_counter() - holdings_order_started, 3)
-                            if holdings_order_started is not None else None, interval,
-                        )
+                        delivery = self._publish_holdings(producer, details_topic, snapshot)
+                        if delivery is not None:
+                            partition, offset = delivery
+                            LOG.info(
+                                "Published holdings with %d positions to partition=%d offset=%d. "
+                                "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
+                                "order_to_update_s=%s next_interval_s=%g",
+                                len(snapshot["positions"]), partition, offset,
+                                holdings_trigger, holdings_command_id, time.perf_counter() - holdings_started,
+                                time.perf_counter() - publish_started,
+                                round(time.perf_counter() - holdings_order_started, 3)
+                                if holdings_order_started is not None else None, interval,
+                            )
                     except Exception as error:
                         if isinstance(error, AuthenticationRequired):
                             self._authentication_required(error)
@@ -417,15 +436,15 @@ class TradingRunner:
                         )
                     finally:
                         command_context.reset(holdings_token)
-                    # Start a full interval after each update finishes, including
-                    # order-triggered updates. Failed attempts also wait before retrying.
-                    next_holdings = time.monotonic() + interval
+                    # Target start-to-start cadence without overlapping requests
+                    # or accumulating catch-up polls when the broker is slow.
+                    next_holdings = max(poll_started + interval, time.monotonic())
                     holdings_trigger = "periodic"
                     holdings_command_id = None
                     holdings_order_started = None
                 if not self.running:
                     break
-                message = consumer.poll(poll_seconds)
+                message = consumer.poll(min(poll_seconds, max(0, next_holdings - time.monotonic())))
                 if message is None:
                     continue
                 if message.error():
