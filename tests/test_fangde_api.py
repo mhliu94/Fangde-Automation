@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
@@ -62,6 +63,38 @@ class TransportTests(unittest.TestCase):
         self.assertNotIn('tradeToken',fields)
         expected=hashlib.md5(('synthetic-login-token1234'+SIGNING_SUFFIX).encode()).hexdigest()
         self.assertEqual(fields['_sign'],[expected])
+
+    def test_slow_portfolio_read_does_not_block_order_query(self):
+        portfolio_started, release, order_done = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        def send(state, method, path, fields):
+            if path.endswith('/portfolio'):
+                portfolio_started.set()
+                if not release.wait(2):
+                    raise AssertionError('test portfolio was not released')
+            return Mock(ok=True)
+        def query(endpoint):
+            try:
+                self.client.read(endpoint)
+                if endpoint == 'orders':
+                    order_done.set()
+            except BaseException as error:
+                errors.append(error)
+        with patch.object(self.client, '_send', side_effect=send):
+            portfolio = threading.Thread(target=query, args=('positions',))
+            orders = threading.Thread(target=query, args=('orders',))
+            portfolio.start()
+            try:
+                self.assertTrue(portfolio_started.wait(1))
+                orders.start()
+                self.assertTrue(order_done.wait(1))
+                self.assertFalse(release.is_set())
+            finally:
+                release.set()
+                portfolio.join(2)
+                if orders.ident is not None:
+                    orders.join(2)
+        self.assertEqual(errors, [])
 
     def test_limit_wire_matches_app_form_and_exact_id(self):
         self.opener.data={'status':'0','data':{'order_no':'9007199254740993123'}}

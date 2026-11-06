@@ -15,7 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request
 from . import legacy_holdings as fd
-from .lock import EmulatorLock
+from .lock import EmulatorLock, fair_thread_lock
 from .diagnostics import workflow_step
 HOST = "https://apitrade.techfx88.com"
 READ_PATHS = {
@@ -117,7 +117,8 @@ class ApiClient:
     def from_settings(cls, settings): return cls(settings)
     @contextmanager
     def _session(self):
-        with EmulatorLock(Path(str(self.settings.session_path)+'.lock'),300):
+        with fair_thread_lock(str(self.settings.session_path)), \
+                EmulatorLock(Path(str(self.settings.session_path)+'.lock'),300):
             state = load_session(self.settings.session_path)
             identity = state["identity"]
             if (identity["account_id"] != str(self.settings.require("fangde.accountId")) or
@@ -185,11 +186,26 @@ class ApiClient:
             if fields: raise ValueError("Today's endpoint returns the complete list without client page parameters.")
             fields={"force":"1","category":"0","bs_flag":"B,S"}
         elif endpoint in ("positions","summary"): fields.setdefault("force","1")
+        needs_trade = endpoint in ('positions','summary','order_history','order_detail')
         with self._session() as state:
-            return self._read_authenticated(state,*READ_PATHS[endpoint],fields,
-                needs_trade=endpoint in ('positions','summary','order_history','order_detail'))
+            if ('authentication' in state and (not state['session'].get('token')
+                    or (needs_trade and not state['session'].get('trade_token')))):
+                return self._read_authenticated(state,*READ_PATHS[endpoint],fields,needs_trade=needs_trade)
+        # Normal reads use an account-validated, private snapshot of the tokens.
+        # Holding the renewal/write lock across network I/O would make a slow
+        # portfolio request block the independent half-second order poller.
+        try:
+            return self._send(state,*READ_PATHS[endpoint],fields)
+        except AuthenticationRequired as error:
+            if 'authentication' not in state or error.scope not in ('login','trade'):
+                raise
+            with self._session() as latest:
+                # Another reader or write may already have renewed this session.
+                # Reuse it; only renew ourselves if the rejected tokens persist.
+                return self._read_authenticated(latest,*READ_PATHS[endpoint],fields,needs_trade=needs_trade,
+                    initial_error=error if latest['session'] == state['session'] else None)
 
-    def _read_authenticated(self,state,method,path,fields,*,needs_trade):
+    def _read_authenticated(self,state,method,path,fields,*,needs_trade,initial_error=None):
         from .authentication import PasswordAuthentication
         auth=PasswordAuthentication(self.settings,self.opener)
         renewed=set()
@@ -204,7 +220,11 @@ class ApiClient:
                             if error.scope!='login':raise
                             auth.renew(state,'login');renewed.add('login')
                     auth.renew(state,'trade');renewed.add('trade')
-            try:return self._send(state,method,path,fields)
+            try:
+                if initial_error is not None:
+                    error, initial_error = initial_error, None
+                    raise error
+                return self._send(state,method,path,fields)
             except AuthenticationRequired as error:
                 if ('authentication' not in state or error.scope not in ('login','trade')
                         or error.scope in renewed or attempt==2):raise

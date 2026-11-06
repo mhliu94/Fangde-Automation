@@ -6,9 +6,48 @@ if os.name == 'nt':
 else:
     import fcntl
 import time
+import threading
+from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 from .errors import SafetyError
+
+
+_thread_gates = {}
+_thread_gates_lock = threading.Lock()
+
+
+@contextmanager
+def fair_thread_lock(key, timeout=300):
+    """FIFO admission before a file lock so a busy poller cannot starve commands.
+
+    The OS file lock still coordinates separate processes. This gate orders
+    threads within this process, where immediate reacquisition otherwise wins
+    repeatedly over a thread sleeping in the file-lock retry loop.
+    """
+    with _thread_gates_lock:
+        condition, queue = _thread_gates.setdefault(key, (threading.Condition(), deque()))
+    ticket = object()
+    deadline = time.monotonic() + timeout
+    with condition:
+        queue.append(ticket)
+        try:
+            while queue[0] is not ticket:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SafetyError("Timed out waiting for a broker session operation.")
+                condition.wait(remaining)
+        except BaseException:
+            queue.remove(ticket)
+            condition.notify_all()
+            raise
+    try:
+        yield
+    finally:
+        with condition:
+            queue.popleft()
+            condition.notify_all()
 
 
 class EmulatorLock:

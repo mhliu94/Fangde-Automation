@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock,patch
@@ -224,12 +225,35 @@ class AuthenticationTests(unittest.TestCase):
             with self.assertRaises(AuthenticationRequired):validate_profile(profile)
 
     def test_concurrent_clients_renew_only_once(self):
-        client=self.client((PORTFOLIO,{'status':1001}),(LOGIN_PATH,login()),(UNLOCK_PATH,unlock()),
-                           (PORTFOLIO,ok()),(PORTFOLIO,ok()))
-        def read():return ApiClient(self.settings,opener=self.opener).read('positions').ok
+        # Both reads can now be in flight with the old session. Force that race
+        # and verify only one reader renews; the other reuses the fresh tokens.
+        barrier = threading.Barrier(2)
+        calls = []
+        def open_request(request, **kwargs):
+            path = urlsplit(request.full_url).path
+            calls.append(path)
+            fields = parse_qs((request.data or b'').decode())
+            if path == LOGIN_PATH:
+                response = login()
+            elif path == UNLOCK_PATH:
+                response = unlock()
+            elif path == PORTFOLIO:
+                if fields['token'] == ['old-login']:
+                    barrier.wait(2)
+                    response = {'status': 1001}
+                else:
+                    self.assertEqual(fields['token'], ['new-login'])
+                    response = ok()
+            else:
+                raise AssertionError('Unexpected endpoint')
+            return io.BytesIO(json.dumps(response).encode())
+        opener = Mock(open=Mock(side_effect=open_request))
+        def read():return ApiClient(self.settings,opener=opener).read('positions').ok
         with ThreadPoolExecutor(max_workers=2) as pool:
             self.assertEqual(list(pool.map(lambda _:read(),range(2))),[True,True])
-        self.assertEqual(len(self.opener.calls),5)
+        self.assertEqual(calls.count(LOGIN_PATH), 1)
+        self.assertEqual(calls.count(UNLOCK_PATH), 1)
+        self.assertEqual(calls.count(PORTFOLIO), 4)
 
     def test_local_password_setup_verifies_reads_before_replacing_export(self):
         client=self.client((LOGIN_PATH,login()),(UNLOCK_PATH,unlock()),(PORTFOLIO,ok()))
