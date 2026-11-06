@@ -1,5 +1,45 @@
 # Validation record
 
+## Order reconciliation and independent monitoring — 2026-11-06
+
+- The 100-share AEHL sell received at 2026-11-05 15:59:08 EST was blocked
+  before submission by an earlier unresolved dispatch. Logs, the dispatch
+  journal and broker history were checked; it was not a broker fill or cancel.
+  Its local rejection was published with the original command ID and verified
+  in the order server as `REJECTED`, zero filled. The account's unreconciled list
+  was empty after consumption. No submit or cancellation request was made for
+  this repair.
+- The runner now persists rejection feedback before committing discarded valid
+  order commands, suppresses rejected-command redelivery, and keeps ambiguous
+  dispatched orders unresolved until supported by broker evidence.
+- Independent order polling targets 0.5 seconds. Read-only requests use validated
+  session snapshots; concurrent authentication failures share one serialized
+  renewal. Financial writes retain the exclusive session lock. FIFO admission
+  prevents a poller from starving other session users.
+- Confirmed changes are persisted immediately and sent by a separate Kafka
+  worker with zero linger. Queued transitions survive delivery failures, process
+  restart and midnight. Unchanged orders remain suppressed after restart.
+  Missing daily-list orders are queried by exact ID; stale observations cannot
+  decrease fills or reopen terminal orders.
+- Live recovery also found three older strategy orders whose broker creation
+  dates had rolled forward. Exact-ID detail reads confirmed cancellation. Their
+  updates retained the original creation time after fixed-identity validation;
+  all three were acknowledged by Kafka and removed from local active tracking.
+- Validation: **245 tests passed**, plus **326 passing subtests**. Coverage
+  includes simultaneous expired-token reads with one renewal, independent reads
+  during a blocked portfolio response, fair session admission, blocked-command
+  reporting, failed persistence before offset commit, duplicate prevention,
+  missing/malformed broker list rows, queued transitions during Kafka failures,
+  and strategy creation-date renewal. Four existing pandas deprecation warnings
+  remain. Local startup validation and `git diff --check` passed.
+- Final live runner restarted at 02:31:52 UTC. A subsequent 65-second observation
+  found no runtime errors, no pending deliveries, and no unchanged order
+  republications across restart. The measured polling sample reached 0.500
+  seconds; individual broker responses can exceed that target. The order server
+  was rechecked at 02:33:34 UTC: the target remained rejected with zero fills and
+  the Fangde account had no unreconciled orders. Saved trading-enabled state was
+  preserved.
+
 ## Premarket investigation and regression coverage — 2026-11-02
 
 - Saved runner logs show a `MARKET_ORDER` to sell 100 AEHL received on

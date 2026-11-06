@@ -102,13 +102,24 @@ Insufficient visible depth uses the outermost available level, so partial fills
 remain possible. The cache refreshes every 30 seconds by default, rejects
 future-dated/inconsistent books, and enforces a maximum age of five minutes.
 
-Orders, positions and cash are polled at startup and every second by default
-(`kafka.holdingsIntervalSeconds`), measured from each query's start. Slow broker
-requests, Kafka delivery and serialized command execution can extend the cadence;
-polls never overlap or accumulate. Completed order/cancel handling triggers an
-immediate refresh, with no default post-order delay. Existing installations must
-set `kafka.holdingsIntervalSeconds` to `1` and `api.postOrderPublishDelaySeconds`
-to `0` if their configuration explicitly overrides these defaults.
+Orders have an independent broker polling worker targeting **0.5 seconds**
+start-to-start (`kafka.orderPollIntervalSeconds`). Positions and cash target one
+second (`kafka.holdingsIntervalSeconds`). Slow broker responses, authentication
+renewal and financial writes can extend the actual cadence; requests never overlap
+within a poller or accumulate catch-up work. Order monitoring continues during
+order-action delays and holdings failures. Its logs include measured cadence.
+Normal broker reads use independent, validated session snapshots, so a slow
+holdings response does not hold the order poller. Session access is queued fairly;
+renewal and financial writes retain the exclusive lock. Reads rejected after a
+concurrent renewal reuse the latest credentials before attempting another renewal.
+Completed order/cancel handling wakes order polling and triggers an immediate
+holdings refresh, with no default post-order delay.
+
+Submission/cancellation confirmation persists each known order change immediately
+and wakes a separate Kafka delivery worker with zero producer linger. Kafka delays
+do not block new broker observations. Existing installations should set
+`kafka.orderPollIntervalSeconds` to `0.5`, `kafka.holdingsIntervalSeconds` to `1`,
+and `api.postOrderPublishDelaySeconds` to `0`.
 
 Account details are published on startup and whenever cash, positions (including
 prices and P/L), or trading-enabled state changes. Observation timestamps and
@@ -118,19 +129,36 @@ payload preserves GigaMoney's `account_id`, `account_num_id`, `cash`,
 `cash_by_currency`, `positions`, `ts`, and `trading_enabled` fields.
 
 Order snapshots use the JSON array key `[account_id,order_id]` and schema version
-1. Only orders created today in `api.orderTimezone` (New York by default) are
-published. CLI today queries retain everything Fangde puts in its today list,
-including older open strategies. Histories are queried only on explicit request.
+1. The daily list discovers orders, including older open strategies. Known
+nonterminal orders omitted from that list are queried by exact broker ID until
+terminal, including after midnight or restart. Histories are queried only on
+explicit request. Absence from a list never implies cancellation or rejection.
 External/app-created orders can be published, without a fabricated command ID.
 Unknown statuses are labeled `UNKNOWN`; missing/invalid data is reported rather
 than invented. Partial cancellations preserve cumulative filled quantity.
 
 Order status records are persisted before publication and marked delivered only
-after Kafka acknowledgment. Retries preserve payload and sequence. Poll-time-only
-changes do not produce new states; a disappeared order is not assumed canceled.
-An unavailable order query does not prevent independently verified holdings from
-being published. The exact KTrader schema is in
+after Kafka acknowledgment. A durable per-order queue retains newer observations
+while earlier deliveries fail. Retries preserve payload and sequence, survive
+midnight, and continue when broker reads fail. Poll-time-only changes and unchanged
+states after restart are suppressed. Stale list responses cannot decrease fills
+or return a terminal order to working status. An unavailable order query does not
+prevent independently verified holdings from being published. The exact KTrader schema is in
 `tests/fixtures/order-status.v1.schema.json`.
+Fangde can renew the displayed creation date on standing strategy orders; their
+first persisted creation time is retained only when exact ID, symbol, side, type,
+and quantity match. Ordinary-order creation-time conflicts remain errors.
+
+Valid order commands discarded before submission (including an unresolved prior
+submission, disabled trading, and expiry) receive durable `REJECTED` feedback before
+their Kafka command offset is committed. These records retain the command ID and
+use a deterministic `local-rejected:<sha256>` ID, explicitly indicating a local
+intent rather than a broker ticket, with zero fills and an explanatory message.
+Their durable record prevents submission on redelivery. Failure to persist that
+feedback stops intake without committing the command. Dispatched or ambiguous
+submissions are never inferred rejected: their dispatch marker and exact broker
+ID remain authoritative. A lost acknowledgment without an exact broker ID still
+requires operator reconciliation; no financial request is automatically replayed.
 
 No real broker or Kafka connection is made by the test suite; HTTP tests use only
 local loopback and synthetic credentials.
