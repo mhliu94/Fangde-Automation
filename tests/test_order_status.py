@@ -127,14 +127,13 @@ class OrderStatusTests(unittest.TestCase):
         self.assertEqual([row["sequence"] for row in self.sent], [0, 1])
         self.assertEqual(self.sent[-1]["status"], "FILLED")
 
-    def test_restart_republishes_completed_order_once_with_same_sequence(self):
+    def test_restart_suppresses_unchanged_completed_order(self):
         filled = dict(self.snapshot, status="FILLED", filled_quantity=2, average_fill_price=2.3)
         self.publish(filled)
         self.publisher = OrderStatusPublisher(self.settings)
         self.publish(filled)
         self.publish(filled)
-        self.assertEqual(len(self.sent), 2)
-        self.assertEqual(self.sent[0], self.sent[1])
+        self.assertEqual(len(self.sent), 1)
         # The server permits a correction to a terminal status, with a new sequence.
         self.publish(dict(filled, average_fill_price=2.31))
         self.assertEqual(self.sent[-1]["sequence"], 1)
@@ -165,22 +164,57 @@ class OrderStatusTests(unittest.TestCase):
         self.publish()
         self.assertEqual(self.sent[0], self.sent[1])
 
-    def test_prior_day_and_future_orders_ignored_using_configured_day(self):
-        self.settings.data["api"] = {"orderTimezone": "America/New_York"}
-        for created in (self.now - timedelta(days=2), self.now + timedelta(days=2)):
-            self.assertEqual(self.publish(dict(self.snapshot, created_at=created.isoformat())), 0)
-        self.assertEqual(self.sent, [])
+    def test_old_orders_and_pending_changes_survive_midnight(self):
+        old = dict(self.snapshot, created_at=(self.now - timedelta(days=2)).isoformat())
+        with self.assertRaises(RuntimeError):
+            self.publisher.publish([old], Mock(side_effect=RuntimeError("offline")))
+        self.publisher = OrderStatusPublisher(self.settings)
+        self.assertEqual(self.publisher.publish([], self.deliver), 1)
+        self.assertEqual(self.sent[0]["created_at"], old["created_at"])
+        self.publish(dict(old, status="FILLED", filled_quantity=2, average_fill_price=2.3))
+        self.assertEqual([row["sequence"] for row in self.sent], [0, 1])
 
-    def test_midnight_and_dst_day_boundaries(self):
-        for now, current, old in (("2026-03-08T05:01:00+00:00", "2026-03-08T05:00:00+00:00", "2026-03-08T04:59:00+00:00"),
-                                  ("2026-11-01T06:01:00+00:00", "2026-11-01T05:00:00+00:00", "2026-11-01T03:59:00+00:00")):
-            with patch("fangde.order_status.datetime") as clock:
-                clock.now.return_value = datetime.fromisoformat(now)
-                clock.fromisoformat.side_effect = datetime.fromisoformat
-                self.publisher = OrderStatusPublisher(self.settings)
-                snapshot = dict(self.snapshot, order_id=now, created_at=current, updated_at=now)
-                self.assertEqual(self.publish(snapshot), 1)
-                self.assertEqual(self.publish(dict(snapshot, order_id=old, created_at=old)), 0)
+    def test_newer_observations_are_retained_while_kafka_is_down(self):
+        offline = Mock(side_effect=RuntimeError("offline"))
+        for snapshot in (self.snapshot, dict(self.snapshot, status="PARTIALLY_FILLED", filled_quantity=1),
+                         dict(self.snapshot, status="FILLED", filled_quantity=2)):
+            with self.assertRaises(RuntimeError):
+                self.publisher.publish([snapshot], offline)
+        self.publisher = OrderStatusPublisher(self.settings)
+        self.assertEqual(self.publisher.publish([], self.deliver), 3)
+        self.assertEqual([row["sequence"] for row in self.sent], [0, 1, 2])
+        self.assertEqual([row["filled_quantity"] for row in self.sent], [0, 1, 2])
+        self.assertEqual(self.publisher.tracked_orders(), {})
+
+    def test_observation_can_be_staged_during_delivery_without_losing_it(self):
+        self.publisher.stage([self.snapshot])
+        def deliver(snapshot):
+            if snapshot["sequence"] == 0:
+                self.publisher.stage([dict(self.snapshot, status="FILLED", filled_quantity=2)])
+            return self.deliver(snapshot)
+        self.assertEqual(self.publisher.drain(deliver), 2)
+        self.assertEqual([row["sequence"] for row in self.sent], [0, 1])
+
+    def test_stale_list_cannot_regress_terminal_detail_or_lose_command_id(self):
+        filled = dict(self.snapshot, status="FILLED", filled_quantity=2, command_id="command")
+        self.publish(filled)
+        self.publish(self.snapshot)
+        self.publish({k:v for k,v in filled.items() if k != "command_id"})
+        self.assertEqual(len(self.sent), 1)
+
+    def test_strategy_renewed_creation_date_preserves_original_identity(self):
+        strategy = dict(self.snapshot, order_id='S20261007US00000050', order_type='OTHER')
+        self.publish(strategy)
+        renewed = dict(strategy, status='CANCELED',
+                       created_at=(self.now + timedelta(days=1)).isoformat(),
+                       updated_at=(self.now + timedelta(days=1)).isoformat())
+        self.publish(renewed)
+        self.assertEqual(self.sent[-1]['created_at'], strategy['created_at'])
+        self.assertEqual(self.sent[-1]['status'], 'CANCELED')
+        self.assertEqual(self.publisher.tracked_orders(), {})
+        self.assertEqual(self.publish(renewed), 0)
+        with self.assertRaises(RuntimeError):
+            self.publish(dict(renewed, quantity=100))
 
     def test_failure_of_one_order_does_not_block_another(self):
         def deliver(snapshot):

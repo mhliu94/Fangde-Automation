@@ -8,7 +8,6 @@ import json
 import logging
 import math
 import re
-from zoneinfo import ZoneInfo
 
 from .api import save_session
 from .lock import EmulatorLock
@@ -127,8 +126,8 @@ def state_fields(snapshot):
 class OrderStatusPublisher:
     """Persist pending snapshots before send, and published snapshots after ACK.
 
-    Each process republishes an unchanged order once on first observation. A
-    retry sends the exact persisted payload/sequence before any newer snapshot.
+    Unchanged orders stay suppressed across restarts. Every observed change is
+    queued before delivery; retries retain the exact payload and sequence.
     """
     def __init__(self, settings):
         self.settings = settings
@@ -136,8 +135,6 @@ class OrderStatusPublisher:
         self.directory = settings.work_dir / "api" / "order-status"
         self.directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.zone = ZoneInfo(settings.get("api.orderTimezone", "America/New_York"))
-        self._seen = set()
 
     def path(self, identifier):
         digest = hashlib.sha256((self.account + "\0" + identifier).encode()).hexdigest()
@@ -147,14 +144,16 @@ class OrderStatusPublisher:
         path = self.path(identifier)
         if not path.exists():
             return {"version": 1, "account_id": self.account, "order_id": identifier,
-                    "published": None, "pending": None}
+                    "published": None, "pending": None, "queued": []}
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
             if (record["version"] != 1 or record["account_id"] != self.account
                     or record["order_id"] != identifier):
                 raise ValueError
-            for name in ("published", "pending"):
-                item = record[name]
+            queued = record.get("queued", [])
+            if not isinstance(queued, list) or (queued and record["pending"] is None):
+                raise ValueError
+            for item in [record["published"], record["pending"], *queued]:
                 if item is not None and (item["account_id"] != self.account or item["order_id"] != identifier
                         or type(item["sequence"]) is not int or not 0 <= item["sequence"] <= MAX_SEQUENCE):
                     raise ValueError
@@ -176,79 +175,137 @@ class OrderStatusPublisher:
                         or timestamp(pending["updated_at"]) < timestamp(published["updated_at"])
                         or (pending["sequence"] == published["sequence"] and pending != published)):
                     raise ValueError
+            previous = record["pending"] or record["published"]
+            for item in record.get("queued", []):
+                if (previous is None or item["account_id"] != self.account
+                        or item["order_id"] != identifier
+                        or type(item["sequence"]) is not int
+                        or item["sequence"] != previous["sequence"] + 1
+                        or item["sequence"] > MAX_SEQUENCE
+                        or item["created_at"] != previous["created_at"]
+                        or timestamp(item["updated_at"]) < timestamp(previous["updated_at"])):
+                    raise ValueError
+                previous = item
             return record
         except (OSError, ValueError, TypeError, KeyError):
             raise ValueError("Order publication record is unreadable; preserve it for sequence recovery.") from None
 
-    def _deliver(self, record, deliver):
-        snapshot = record["pending"]
-        partition, offset = deliver(snapshot)
-        record.update(published=snapshot, pending=None,
-                      published_at=datetime.now(timezone.utc).isoformat(), partition=partition, offset=offset)
-        save_session(self.path(record["order_id"]), record)
-        self._seen.add(record["order_id"])
+    def _lock(self):
+        return EmulatorLock(self.directory.parent / "order-status.lock",
+                            float(self.settings.get("automation.lockTimeoutSeconds", 300)))
 
-    def publish(self, snapshots, deliver):
-        """Deliver independent orders even if another order's delivery fails."""
-        sent, failed = 0, 0
-        with EmulatorLock(self.directory.parent / "order-status.lock",
-                          float(self.settings.get("automation.lockTimeoutSeconds", 300))):
-            today = datetime.now(timezone.utc).astimezone(self.zone).date()
-            observed_ids = {snapshot["order_id"] for snapshot in snapshots}
+    def tracked_orders(self):
+        """Keep exact IDs until a terminal observation, including across midnight."""
+        terminal = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+        result = {}
+        with self._lock():
+            for path in sorted(self.directory.glob("*.json")):
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                if saved["account_id"] != self.account:
+                    continue
+                record = self._read(saved["order_id"])
+                latest = (record.get("queued") or [record["pending"] or record["published"]])[-1]
+                if latest["status"] not in terminal:
+                    result[latest["order_id"]] = latest.get("command_id")
+        return result
+
+    def stage(self, snapshots):
+        """Durably queue all changed observations without waiting for Kafka."""
+        changed = 0
+        with self._lock():
             for snapshot in snapshots:
-                try:
-                    if snapshot["account_id"] != self.account:
-                        raise ValueError("Order publication account mismatch.")
-                    if timestamp(snapshot["created_at"]).astimezone(self.zone).date() != today:
+                if snapshot["account_id"] != self.account:
+                    raise ValueError("Order publication account mismatch.")
+                identifier = snapshot["order_id"]
+                record = self._read(identifier)
+                previous = (record.get("queued") or [record["pending"] or record["published"]])[-1]
+                if previous is not None:
+                    snapshot = dict(snapshot)
+                    if previous.get("command_id") and not snapshot.get("command_id"):
+                        snapshot["command_id"] = previous["command_id"]
+                    if previous["created_at"] != snapshot["created_at"]:
+                        # Fangde renews the displayed creation date on standing
+                        # strategy tickets. Keep the first persisted date for
+                        # this exact ID, only after checking its fixed identity.
+                        if (identifier.startswith("S") and snapshot["order_type"] == "OTHER"
+                                and all(previous[key] == snapshot[key] for key in
+                                        ("symbol", "side", "order_type", "quantity"))):
+                            snapshot["created_at"] = previous["created_at"]
+                        else:
+                            raise ValueError("Order creation time changed for an existing order ID.")
+                    terminal = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+                    if (snapshot["filled_quantity"] < previous["filled_quantity"]
+                            or (previous["status"] in terminal and snapshot["status"] not in terminal)):
+                        LOG.warning("Ignoring regressive broker observation order_id=%s previous=%s observed=%s.",
+                                    identifier, previous["status"], snapshot["status"])
                         continue
-                    identifier = snapshot["order_id"]
-                    record = self._read(identifier)
-                    if record["pending"] is not None:
-                        self._deliver(record, deliver)
-                        sent += 1
-                    previous = record["published"]
-                    if previous is not None and previous["created_at"] != snapshot["created_at"]:
-                        raise ValueError("Order creation time changed for an existing order ID.")
-                    changed = previous is None or state_fields(previous) != state_fields(snapshot)
-                    if not changed and identifier in self._seen:
+                    if state_fields(previous) == state_fields(snapshot):
                         continue
-                    if changed:
-                        sequence = previous["sequence"] + 1 if previous else 0
-                        if sequence > MAX_SEQUENCE:
-                            raise ValueError("Order sequence exceeds the KTrader contract.")
-                        update = dict(snapshot, sequence=sequence)
-                        if previous:
-                            update["updated_at"] = max(timestamp(previous["updated_at"]),
-                                                       timestamp(update["updated_at"])).isoformat()
-                    else:
-                        update = previous
+                sequence = previous["sequence"] + 1 if previous else 0
+                if sequence > MAX_SEQUENCE:
+                    raise ValueError("Order sequence exceeds the KTrader contract.")
+                update = dict(snapshot, sequence=sequence)
+                if previous:
+                    update["updated_at"] = max(timestamp(previous["updated_at"]),
+                                               timestamp(update["updated_at"])).isoformat()
+                if record["pending"] is None:
                     record["pending"] = update
-                    save_session(self.path(identifier), record)
-                    self._deliver(record, deliver)
-                    sent += 1
-                except Exception as error:
-                    failed += 1
-                    LOG.error("Order publication failed error_type=%s; will retry on next holdings refresh.",
-                              type(error).__name__)
-            # A failed send remains deliverable even if a later broker list
-            # omits the order or the orders endpoint is temporarily unavailable.
+                else:
+                    record.setdefault("queued", []).append(update)
+                save_session(self.path(identifier), record)
+                changed += 1
+        return changed
+
+    def drain(self, deliver):
+        """Retry outstanding changes even when broker reads fail or the day rolls."""
+        sent, failed = 0, 0
+        # Serialize senders, but release the state lock during network I/O so
+        # observations can be persisted while Kafka is unavailable.
+        with EmulatorLock(self.directory.parent / "order-delivery.lock",
+                          float(self.settings.get("automation.lockTimeoutSeconds", 300))):
             for path in sorted(self.directory.glob("*.json")):
                 try:
                     saved = json.loads(path.read_text(encoding="utf-8"))
-                    if saved["account_id"] != self.account or saved["order_id"] in observed_ids:
-                        continue
-                    if path != self.path(saved["order_id"]):
+                    identifier = saved["order_id"]
+                    if path != self.path(identifier):
                         raise ValueError("Order publication record filename mismatch.")
-                    record = self._read(saved["order_id"])
-                    pending = record["pending"]
-                    if pending is not None and timestamp(pending["created_at"]).astimezone(self.zone).date() == today:
-                        self._deliver(record, deliver)
+                    while True:
+                        with self._lock():
+                            record = self._read(identifier)
+                            snapshot = record["pending"]
+                        if snapshot is None:
+                            break
+                        partition, offset = deliver(snapshot)
+                        with self._lock():
+                            record = self._read(identifier)
+                            if record["pending"] != snapshot:
+                                raise ValueError("Pending delivery changed unexpectedly.")
+                            queued = record.get("queued", [])
+                            record.update(published=snapshot, pending=queued.pop(0) if queued else None,
+                                          queued=queued, partition=partition, offset=offset,
+                                          published_at=datetime.now(timezone.utc).isoformat())
+                            save_session(path, record)
                         sent += 1
                 except Exception as error:
                     failed += 1
-                    LOG.error("Pending order publication failed error_type=%s; record retained.", type(error).__name__)
-        LOG.log(logging.INFO if sent or failed else logging.DEBUG,
-                "Order status publication completed delivered=%d failed=%d observed=%d.", sent, failed, len(snapshots))
+                    LOG.error("Order delivery failed order_id=%s error_type=%s; durable retry retained.",
+                              path.stem, type(error).__name__)
+        if sent or failed:
+            LOG.info("Order status publication completed delivered=%d failed=%d.", sent, failed)
         if failed:
             raise RuntimeError(f"Order status publication failed for {failed} order(s); pending snapshots retained.")
+        return sent
+
+    def publish(self, snapshots, deliver):
+        failures = 0
+        for snapshot in snapshots:
+            try:
+                self.stage([snapshot])
+            except Exception as error:
+                failures += 1
+                LOG.error("Order staging failed order_id=%s error_type=%s.",
+                          snapshot.get("order_id"), type(error).__name__)
+        sent = self.drain(deliver)
+        if failures:
+            raise RuntimeError(f"Order staging failed for {failures} order(s).")
         return sent
