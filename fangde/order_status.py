@@ -123,6 +123,35 @@ def state_fields(snapshot):
     return {key: value for key, value in snapshot.items() if key not in {"sequence", "updated_at"}}
 
 
+def rejection_id(command_id):
+    return "local-rejected:" + hashlib.sha256(command_id.encode()).hexdigest()
+
+
+def rejection_snapshot(command, settings, *, reason, observed_at):
+    """A locally rejected intent, explicitly distinguished from a broker ticket.
+
+    Call only with positive evidence that this command was never dispatched.
+    An ambiguous submission must never be reported as rejected.
+    """
+    from .runner import command_plan
+    plan = command_plan(command)
+    if plan.kind not in {"market", "limit"}:
+        raise ValueError("Only validated order intents have rejection snapshots.")
+    created = timestamp(command["ts"])
+    identifier = str(command["command_id"])
+    row = {"order_id_str": rejection_id(identifier), "submitted_at": created.isoformat(),
+           "updated_at": max(created, observed_at).isoformat(),
+           "counter_id": "ST/US/" + plan.arguments["symbol"],
+           "action": "1" if plan.arguments["side"] == "Buy" else "2",
+           "order_type": "MO" if plan.kind == "market" else "LO",
+           "quantity": plan.arguments["quantity"], "executed_qty": "0",
+           "status": "RejectedStatus", "price": plan.arguments.get("price"),
+           "currency": "USD", "time_in_force": "DAY"}
+    result = order_snapshot(row, settings, observed_at=observed_at, command_id=identifier)
+    result["message"] = ("Not submitted to broker; locally rejected by Fangde runner: " + reason)[:2000]
+    return result
+
+
 class OrderStatusPublisher:
     """Persist pending snapshots before send, and published snapshots after ACK.
 
@@ -193,6 +222,11 @@ class OrderStatusPublisher:
     def _lock(self):
         return EmulatorLock(self.directory.parent / "order-status.lock",
                             float(self.settings.get("automation.lockTimeoutSeconds", 300)))
+
+    def has_rejection(self, command_id):
+        with self._lock():
+            record = self._read(rejection_id(command_id))
+            return bool(record["pending"] or record["published"])
 
     def tracked_orders(self):
         """Keep exact IDs until a terminal observation, including across midnight."""

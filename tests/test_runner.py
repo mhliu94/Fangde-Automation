@@ -342,7 +342,11 @@ class RunnerLoopTests(unittest.TestCase):
                 patch.object(runner, "_publish_snapshot", side_effect=publish),
                 patch.object(runner, "_publish_orders", side_effect=publish_orders),
             ):
-                runner.run()
+                try:
+                    runner.run()
+                except OSError:
+                    consumer.commit.assert_not_called()
+                    raise
             consumer.commit.assert_called_once_with(message=message, asynchronous=False)
             consumer.close.assert_called_once_with()
             return events, snapshots, operations
@@ -367,6 +371,43 @@ class RunnerLoopTests(unittest.TestCase):
         self.assertTrue(any(record.getMessage().startswith("Command received ") for record in logs.records))
         self.assertEqual(self.command_results(logs)[0]["reason"], "stale")
         self.assertNotIn("market", [call.args[0] for call in operations.call_args_list])
+
+    def test_blocked_command_has_durable_rejection_before_commit(self):
+        from fangde.order_status import OrderStatusPublisher, rejection_id
+        from fangde.workflows import OrderUncertain
+        original = TradingRunner._reject_unsubmitted
+        snapshots = []
+        def reject(runner, command, reason):
+            result = original(runner, command, reason)
+            snapshots.append(OrderStatusPublisher(runner.settings)._read(rejection_id(command['command_id']))['pending'])
+            return result
+        with patch.object(TradingRunner, '_reject_unsubmitted', reject):
+            _, _, operations = self.run_command({'type': 'LIMIT_ORDER'},
+                result=OrderUncertain('A previous submission is unresolved'))
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]['status'], 'REJECTED')
+        self.assertEqual(snapshots[0]['command_id'], 'test-order')
+        self.assertEqual([call.args[0] for call in operations.call_args_list].count('limit'), 1)
+
+    def test_failed_rejection_persistence_stops_without_committing(self):
+        from fangde.workflows import OrderUncertain
+        with patch.object(TradingRunner, '_reject_unsubmitted', side_effect=OSError('disk full')), \
+             self.assertRaisesRegex(OSError, 'disk full'):
+            self.run_command({'type': 'LIMIT_ORDER'}, result=OrderUncertain('blocked'))
+
+    def test_ambiguous_dispatched_order_is_never_locally_rejected(self):
+        from fangde.workflows import OrderUncertain
+        with patch.object(TradingRunner, '_reject_unsubmitted') as reject:
+            self.run_command({'type': 'LIMIT_ORDER'}, result=OrderUncertain('lost ACK', submitted=True))
+        reject.assert_not_called()
+
+    def test_rejected_command_redelivery_cannot_submit_after_restart(self):
+        from fangde.order_status import OrderStatusPublisher
+        with patch.object(OrderStatusPublisher, 'has_rejection', return_value=True):
+            with self.assertLogs('fangde', level='INFO') as logs:
+                _, _, operations = self.run_command({'type': 'LIMIT_ORDER'})
+        self.assertNotIn('limit', [call.args[0] for call in operations.call_args_list])
+        self.assertEqual(self.command_results(logs)[0]['reason'], 'previously_rejected')
 
 
     def test_unsuccessful_or_unsubmitted_orders_do_not_refresh(self):

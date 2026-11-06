@@ -177,6 +177,7 @@ class TradingRunner:
         self.backend = execution_backend(settings)
         self.api_executor = None
         self.order_publisher = None
+        self.order_monitor = None
         self._published_holdings_state = None
         self.state_path = settings.work_dir / "trading-state.json"
         self.stop_path = settings.work_dir / "runner.stop"
@@ -289,6 +290,31 @@ class TradingRunner:
         # send retries on the next poll; a restart publishes a fresh baseline.
         self._published_holdings_state = fingerprint
         return result
+
+    def _reject_unsubmitted(self, command, reason):
+        """Persist terminal feedback before committing a discarded command.
+
+        The durable dispatch marker is the authority: absence from a broker list
+        or a timeout is never sufficient proof of rejection.
+        """
+        from .order_status import OrderStatusPublisher, rejection_snapshot
+        from .workflows import OrderJournal
+        identifier = str(command["command_id"])
+        with EmulatorLock(self.settings.work_dir / "api/operation.lock", self.lock_timeout):
+            journal = OrderJournal(self.settings.work_dir / "api/orders",
+                                   str(self.settings.require("fangde.accountId")))
+            record = journal.read(identifier)
+            if record and (record.get("sent_at") or record.get("order_id")):
+                return False
+            if OrderStatusPublisher(self.settings).has_rejection(identifier):
+                return True
+            snapshot = rejection_snapshot(command, self.settings, reason=reason,
+                                          observed_at=datetime.now(timezone.utc))
+            OrderStatusPublisher(self.settings).stage([snapshot])
+        if self.order_monitor:
+            self.order_monitor.wake()
+        LOG.warning("Unsubmitted command rejection persisted command_id=%s.", identifier)
+        return True
 
     def run(self, *, live: bool = False) -> None:
         # Prevent an Android and API runner (or two API runners) from consuming
@@ -459,6 +485,8 @@ class TradingRunner:
                 log_command = True
                 command_token = None
                 source_token = None
+                command = None
+                plan = None
                 source = {"topic": command_topic, "partition": message.partition(), "offset": message.offset()}
                 try:
                     command = json.loads(message.value().decode("utf-8"))
@@ -467,6 +495,7 @@ class TradingRunner:
                     command_id = str(command.get("command_id") or "<missing>")
                     if self.backend == "api" and command_id == "<missing>":
                         command_id = f"kafka:{command_topic}:{message.partition()}:{message.offset()}"
+                    command["command_id"] = command_id
                     command_type = str(command.get("type", ""))
                     command_token = command_context.set(command_id)
                     command_stage = "validate"
@@ -478,13 +507,22 @@ class TradingRunner:
                     LOG.info("Command received %s", error_detail(json.dumps({
                         "source": source, "command": command_log_fields(command),
                     }, separators=(",", ":")), self.settings))
+                    plan = command_plan(command)
                     if command_is_stale(command, maximum_age):
                         command_outcome, command_reason = "ignored", "stale"
+                        if plan.kind in {"market", "limit"}:
+                            self._reject_unsubmitted(command, "Command expired before submission")
                         command_stage = "commit"
                         consumer.commit(message=message, asynchronous=False)
                         committed = True
                         continue
-                    plan = command_plan(command)
+                    if plan.kind in {"market", "limit"}:
+                        from .order_status import OrderStatusPublisher
+                        if OrderStatusPublisher(self.settings).has_rejection(command_id):
+                            command_outcome, command_reason = "ignored", "previously_rejected"
+                            consumer.commit(message=message, asynchronous=False)
+                            committed = True
+                            continue
                     if plan.kind == "ignore":
                         command_outcome, command_reason = "ignored", "unsupported_type"
                     elif plan.kind == "state":
@@ -495,6 +533,7 @@ class TradingRunner:
                                  command_id, trading_enabled)
                     elif plan.kind != "cancel" and not trading_enabled:
                         command_outcome, command_reason = "ignored", "trading_disabled"
+                        self._reject_unsubmitted(command, "Trading disabled before submission")
                     else:
                         command_stage = "execute"
                         LOG.info("Executing %s command_id=%s.", plan.name, command_id)
@@ -517,7 +556,7 @@ class TradingRunner:
                     committed = True
                 except Exception as error:
                     if getattr(error, "submitted", False) or (
-                        self.backend == "api" and command_stage == "execute" and plan.kind == "cancel"
+                        self.backend == "api" and command_stage == "execute" and plan is not None and plan.kind == "cancel"
                     ):
                         # An accepted order can still fail later (for example while
                         # confirming cancellation). Cancel-all can also fail after
@@ -539,6 +578,11 @@ class TradingRunner:
                     elif not commit_failed:
                         raise
                     else:
+                        if (plan is not None and plan.kind in {"market", "limit"}
+                                and not getattr(error, "submitted", False)):
+                            # If durable feedback cannot be stored, do not commit:
+                            # stop intake and retain the command for recovery.
+                            self._reject_unsubmitted(command, error_detail(error, self.settings))
                         consumer.commit(message=message, asynchronous=False)
                         committed = True
                         LOG.warning("Committed failed command to prevent unsafe replay. command_id=%s", command_id)
