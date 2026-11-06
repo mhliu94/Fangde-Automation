@@ -82,6 +82,64 @@ def market_session(now=None):
     raise ValueError("US market is closed or overnight; market command was not queued.")
 
 class ApiTrading(WorkflowBase):
+    def poll_order_status(self):
+        """Independent read-only polling, including exact IDs missing from today.
+
+        Session renewal is serialized by ApiClient's session lock. This read
+        does not take the financial operation lock or wait for an action delay.
+        """
+        from .order_status import OrderStatusPublisher, order_snapshot
+        publisher = OrderStatusPublisher(self.settings)
+        commands = {r["order_id"]: r["command_id"] for r in self.journal.records()
+                    if r.get("order_id") and r.get("intent")}
+        tracked = publisher.tracked_orders()
+        # Accepted commands can predate the first outbox observation after a crash.
+        for record in self.journal.records():
+            if (record.get("order_id") and record.get("intent")
+                    and record.get("result", {}).get("status") not in TERMINAL):
+                saved = publisher._read(record["order_id"])
+                latest = (saved.get("queued") or [saved["pending"] or saved["published"]])[-1]
+                if latest is None:
+                    tracked.setdefault(record["order_id"], record["command_id"])
+        seen, errors = set(), 0
+        try:
+            data = self._read("orders")
+            if not isinstance(data, dict) or not isinstance(data.get("list"), list):
+                raise ValueError("Today's order list is missing.")
+            raw_rows = data["list"]
+        except AuthenticationRequired:
+            raise
+        except Exception as error:
+            LOG.error("Order list unavailable error_type=%s; checking tracked IDs.", type(error).__name__)
+            raw_rows, errors = [], 1
+        def observe(row):
+            identifier = order_id(row)
+            snapshot = order_snapshot(row, self.settings, observed_at=datetime.now(timezone.utc),
+                                      command_id=commands.get(identifier) or tracked.get(identifier))
+            publisher.stage([snapshot])
+            if self.on_order_observed:
+                self.on_order_observed()
+            seen.add(identifier)
+        for raw in raw_rows:
+            if not isinstance(raw, dict) or raw.get("exchange") != "US":
+                continue
+            try:
+                observe(normalize_order(raw, self.settings))
+            except Exception as error:
+                errors += 1
+                LOG.error("Order observation failed order_id=%s error_type=%s.",
+                          raw.get("order_no"), type(error).__name__)
+        for identifier in tracked.keys() - seen:
+            try:
+                observe(self._detail(identifier))
+            except AuthenticationRequired:
+                raise
+            except Exception as error:
+                errors += 1
+                LOG.error("Tracked order query failed order_id=%s error_type=%s; remains unresolved.",
+                          identifier, type(error).__name__)
+        return {"observed": len(seen), "errors": errors}
+
     def reconcile_order(self, command_id, identifier):
         """Operator-supplied exact match after inspecting the broker's orders.
 
@@ -148,7 +206,7 @@ class ApiTrading(WorkflowBase):
         with self._lock(): return {"orders":self._orders()}
 
     @logged_workflow
-    def query(self):
+    def query(self, *, include_orders=True):
         with self._lock():
             workflow_attempt(1)
             data=self._read("positions")
@@ -173,7 +231,7 @@ class ApiTrading(WorkflowBase):
             if not balances or len({row["currency"] for row in balances})!=len(balances):
                 raise ValueError("Incomplete cash balances.")
             observed=datetime.now(timezone.utc)
-            try: orders=self._orders()
+            try: orders=self._orders() if include_orders else []
             except AuthenticationRequired: raise
             except (ApiError,TransportError,ValueError):
                 LOG.error("Today's orders query failed; holdings remain available, order statuses will retry.")

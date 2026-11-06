@@ -211,6 +211,8 @@ class TradingRunner:
             method = {"market": "market_order", "limit": "limit_order", "cancel": "cancel_all", "holdings": "query", "recover": "recover_pending"}.get(kind)
             if method is None:
                 raise ValueError(f"Unknown operation: {kind}")
+            if kind == "holdings" and self.order_monitor is not None:
+                arguments = dict(arguments, include_orders=False)
             return getattr(self.api_executor, method)(**arguments)
         raise ValueError("Only the Fangde API backend is supported.")
 
@@ -339,6 +341,7 @@ class TradingRunner:
     def _authentication_required(self, error) -> None:
         from .api import save_session
         directory = self.settings.work_dir / "api"
+        self.running = False
         save_session(directory / "authentication.json", {
             "state": "authentication_required", "account_id": self.settings.get("fangde.accountId"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -398,6 +401,17 @@ class TradingRunner:
         LOG.info("Runner started for account_id=%s topic=%s backend=%s holdings_interval_s=%g publish_on_change=true.",
                  account_id, command_topic, self.backend, interval)
         try:
+            if self.api_executor is not None:
+                from .order_monitor import OrderMonitor
+                order_producer = Producer({**self.settings.kafka_client_config,
+                    "bootstrap.servers": bootstrap, "acks": "all", "enable.idempotence": True,
+                    "linger.ms": 0,
+                    "delivery.timeout.ms": max(1000, int(float(self.settings.get("kafka.deliveryTimeoutSeconds", 10)) * 1000)),
+                    "request.timeout.ms": max(1000, int(float(self.settings.get("kafka.deliveryTimeoutSeconds", 10)) * 1000)),
+                })
+                self.order_monitor = OrderMonitor(self, order_producer)
+                self.api_executor.on_order_observed = self.order_monitor.wake
+                self.order_monitor.start()
             while self.running and not self.stop_path.exists():
                 now = time.monotonic()
                 if now >= next_holdings:
@@ -419,13 +433,13 @@ class TradingRunner:
                                 time.sleep(delay)
                             holdings_stage = "query"
                         holdings = self._operation("holdings", {})
-                        if self.backend == "api":
+                        if self.backend == "api" and self.running:
                             (self.settings.work_dir / "api/authentication.json").unlink(missing_ok=True)
                         LOG.info(
                             "Holdings query completed in %.3f seconds.",
                             time.perf_counter() - holdings_started,
                         )
-                        if self.backend == "api":
+                        if self.backend == "api" and self.order_monitor is None:
                             try:
                                 self._publish_orders(producer, holdings.get("orders", []))
                             except Exception as error:
@@ -538,6 +552,8 @@ class TradingRunner:
                         command_stage = "execute"
                         LOG.info("Executing %s command_id=%s.", plan.name, command_id)
                         result = self._operation(plan.kind, plan.arguments)
+                        if self.order_monitor:
+                            self.order_monitor.wake()
                         if (
                             (plan.kind in {"market", "limit"}
                              and result.get("ok") and result.get("submitted"))
@@ -599,6 +615,9 @@ class TradingRunner:
                     if source_token is not None:
                         command_source_context.reset(source_token)
         finally:
+            if self.order_monitor is not None:
+                self.order_monitor.close()
+                self.order_monitor = None
             consumer.close()
             producer.flush(5)
             try:

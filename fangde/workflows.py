@@ -104,6 +104,17 @@ class WorkflowBase:
         self.directory = settings.work_dir / "api"
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.journal = OrderJournal(self.directory / "orders", str(settings.require("fangde.accountId")))
+        self.on_order_observed = None
+
+    def _observe_order(self, row, command_id=None):
+        # Persist a confirmed state before returning from the workflow. The
+        # reporting worker can send it immediately, even while cancellation waits.
+        from .order_status import OrderStatusPublisher, order_snapshot
+        snapshot = order_snapshot(row, self.settings, observed_at=datetime.now(timezone.utc),
+                                  command_id=command_id)
+        OrderStatusPublisher(self.settings).stage([snapshot])
+        if self.on_order_observed:
+            self.on_order_observed()
 
     def _lock(self):
         return EmulatorLock(self.directory / "operation.lock", float(self.settings.get("automation.lockTimeoutSeconds", 300)))
@@ -153,11 +164,13 @@ class WorkflowBase:
                 or row.get("order_type") != expected["order_type"]
                 or (expected["order_type"] == "LO" and decimal(row.get("price")) != decimal(expected["price"]))):
             raise OrderUncertain("Acknowledged order does not match the intended ticket.", submitted=True)
+        self._observe_order(row, key)
         return row
 
     def _cancel_one(self, identifier, record, key):
         workflow_step("confirm_cancel", orderId=identifier)
         row = self._detail(identifier)
+        self._observe_order(row, key if record.get("intent") else None)
         if row["status"] in TERMINAL:
             return row
         cancellation_sent = record.get("cancel_sent_at") or any(
@@ -179,6 +192,7 @@ class WorkflowBase:
             if delay:
                 self.sleeper(delay)
             row = self._detail(identifier)
+            self._observe_order(row, key if record.get("intent") else None)
             if row["status"] in TERMINAL:
                 return row
         raise OrderUncertain("Cancellation is still unconfirmed; no additional cancel was sent.", submitted=bool(record.get("request")))

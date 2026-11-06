@@ -77,7 +77,8 @@
     "sessionTimeoutMilliseconds": 10000,
     "deliveryTimeoutSeconds": 10,
     "producerLingerMilliseconds": 5,
-    "clientConfig": {}
+    "clientConfig": {},
+    "orderPollIntervalSeconds": 0.5
   },
   "monitor": {
     "serverId": "",

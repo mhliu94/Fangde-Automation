@@ -79,6 +79,7 @@ DEFAULTS: dict[str, Any] = {'paths': {'workDir': 'work', 'logDir': 'logs'},
            'maxCommandAgeSeconds': 300,
            'commitFailedCommands': True,
            'holdingsIntervalSeconds': 1,
+           'orderPollIntervalSeconds': 0.5,
            'clientVersion': '2.15.0',
            'sessionTimeoutMilliseconds': 10000,
            'deliveryTimeoutSeconds': 10,
@@ -228,7 +229,7 @@ def validate_config(raw: dict, defaults: dict = DEFAULTS, prefix: str = "") -> N
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ConfigurationError(f"{name} must be a finite nonnegative number.")
             if (name.endswith(("Attempts", "MaxTries", "maxOrderPages", "maxLoginFailures")) or
-                    key in {"holdingsIntervalSeconds", "pollTimeoutSeconds", "intervalSeconds", "checkIntervalSeconds",
+                    key in {"holdingsIntervalSeconds", "orderPollIntervalSeconds", "pollTimeoutSeconds", "intervalSeconds", "checkIntervalSeconds",
                             "priceBookLookbackSeconds", "priceBookTimeoutSeconds", "priceBookBatchSize", "priceBookPollIntervalSeconds",
                             "marketStatusMaxAgeSeconds"}) and value <= 0:
                 raise ConfigurationError(f"{name} must be positive.")
