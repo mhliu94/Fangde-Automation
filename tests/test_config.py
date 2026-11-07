@@ -16,6 +16,10 @@ from datetime import datetime, timezone
 
 class ConfigTests(unittest.TestCase):
 
+    def test_default_account_refresh_is_thirty_seconds_with_independent_order_polling(self):
+        self.assertEqual(DEFAULTS["kafka"]["holdingsIntervalSeconds"], 30)
+        self.assertEqual(DEFAULTS["kafka"]["orderPollIntervalSeconds"], 0.5)
+
     def test_price_cache_accepts_legacy_age_and_requires_positive_poll_interval(self):
         validate_config({"kafka": {"priceBookMaxAgeSeconds": None, "priceBookPollIntervalSeconds": 30}})
         with self.assertRaises(ConfigurationError):

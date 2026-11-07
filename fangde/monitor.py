@@ -422,7 +422,7 @@ class FangdeController:
             durations.append(float(match.group("seconds")))
         estimated = False
         if not durations and session_started:
-            interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 1) or 1)
+            interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 30) or 30)
             if interval > 0:
                 for match in HOLDINGS_PUBLISHED_PATTERN.finditer(content):
                     logged = parse_datetime(match.group("timestamp"))

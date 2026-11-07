@@ -72,7 +72,7 @@
     "maxPollIntervalMilliseconds": 900000,
     "maxCommandAgeSeconds": 300,
     "commitFailedCommands": true,
-    "holdingsIntervalSeconds": 1,
+    "holdingsIntervalSeconds": 30,
     "clientVersion": "2.15.0",
     "sessionTimeoutMilliseconds": 10000,
     "deliveryTimeoutSeconds": 10,

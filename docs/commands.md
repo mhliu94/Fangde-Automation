@@ -103,8 +103,8 @@ remain possible. The cache refreshes every 30 seconds by default, rejects
 future-dated/inconsistent books, and enforces a maximum age of five minutes.
 
 Orders have an independent broker polling worker targeting **0.5 seconds**
-start-to-start (`kafka.orderPollIntervalSeconds`). Positions and cash target one
-second (`kafka.holdingsIntervalSeconds`). Slow broker responses, authentication
+start-to-start (`kafka.orderPollIntervalSeconds`). Positions and cash target 30
+seconds (`kafka.holdingsIntervalSeconds`). Slow broker responses, authentication
 renewal and financial writes can extend the actual cadence; requests never overlap
 within a poller or accumulate catch-up work. Order monitoring continues during
 order-action delays and holdings failures. Its logs include measured cadence.
@@ -118,14 +118,15 @@ holdings refresh, with no default post-order delay.
 Submission/cancellation confirmation persists each known order change immediately
 and wakes a separate Kafka delivery worker with zero producer linger. Kafka delays
 do not block new broker observations. Existing installations should set
-`kafka.orderPollIntervalSeconds` to `0.5`, `kafka.holdingsIntervalSeconds` to `1`,
+`kafka.orderPollIntervalSeconds` to `0.5`, `kafka.holdingsIntervalSeconds` to `30`,
 and `api.postOrderPublishDelaySeconds` to `0`.
 
-Account details are published on startup and whenever cash, positions (including
-prices and P/L), or trading-enabled state changes. Observation timestamps and
-position ordering alone do not cause publication. A failed delivery does not
-advance the last-published state and is retried on the next poll. The account
-payload preserves GigaMoney's `account_id`, `account_num_id`, `cash`,
+Full account details are published on startup, every 30 seconds, and after
+order/cancel handling, even when balances and positions are unchanged. Every
+successful query sends the complete snapshot with its fresh observation timestamp
+so the control server can establish account freshness. Failed queries do not
+publish cached holdings with a new timestamp; failed deliveries are retried with
+the next fresh query. The account payload preserves GigaMoney's `account_id`, `account_num_id`, `cash`,
 `cash_by_currency`, `positions`, `ts`, and `trading_enabled` fields.
 
 Order snapshots use the JSON array key `[account_id,order_id]` and schema version

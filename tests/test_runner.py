@@ -1,4 +1,3 @@
-import copy
 import json
 import sys
 import tempfile
@@ -146,7 +145,7 @@ class RunnerTests(unittest.TestCase):
                 FakeProducer(report=False), "account-details", snapshot
             )
 
-    def test_holdings_publish_only_changed_data_and_retry_failed_delivery(self):
+    def test_full_holdings_publish_when_unchanged_and_retry_failed_delivery(self):
         runner = TradingRunner(self.settings())
         producer = FakeProducer()
         snapshot = holdings_snapshot({
@@ -157,38 +156,20 @@ class RunnerTests(unittest.TestCase):
         with patch.object(producer, "produce", wraps=producer.produce) as produce:
             self.assertIsNotNone(runner._publish_holdings(producer, "details", snapshot))
             reordered = dict(snapshot, ts="2026-11-05T12:00:00Z", positions=list(reversed(snapshot["positions"])))
-            self.assertIsNone(runner._publish_holdings(producer, "details", reordered))
-            produce.assert_called_once()
+            self.assertIsNotNone(runner._publish_holdings(producer, "details", reordered))
+            self.assertEqual(producer.value, reordered)
             producer.error = "delivery failure"
-            changed = dict(snapshot, cash=90)
             with self.assertRaises(RuntimeError):
-                runner._publish_holdings(producer, "details", changed)
+                runner._publish_holdings(producer, "details", reordered)
             producer.error = None
-            self.assertIsNotNone(runner._publish_holdings(producer, "details", changed))
-            self.assertIsNone(runner._publish_holdings(producer, "details", changed))
-            self.assertEqual(produce.call_count, 3)
-
-    def test_all_account_fields_trigger_publication_and_restart_sends_baseline(self):
-        baseline = holdings_snapshot({"positions": [{"symbol": "AAPL", "quantity": 2, "cost": 10}]},
-                                     self.settings(), True)
-        changes = [dict(baseline, cash=1), dict(baseline, cash_by_currency={"HKD": 10}),
-                   dict(baseline, trading_enabled=False), dict(baseline, positions=[])]
-        for field in ("qty", "avg_price", "marketPrice", "marketValue", "dailyPL", "dailyPLPercent"):
-            changed = copy.deepcopy(baseline)
-            changed["positions"][0][field] = 123
-            changes.append(changed)
-        for changed in changes:
-            with self.subTest(changed=changed):
-                runner = TradingRunner(self.settings())
-                producer = FakeProducer()
-                runner._publish_holdings(producer, "details", baseline)
-                self.assertIsNotNone(runner._publish_holdings(producer, "details", changed))
-                self.assertIsNone(runner._publish_holdings(producer, "details", changed))
-                self.assertIsNotNone(TradingRunner(runner.settings)._publish_holdings(producer, "details", changed))
+            self.assertIsNotNone(runner._publish_holdings(producer, "details", reordered))
+            self.assertEqual(producer.value, reordered)
+            self.assertIsNotNone(TradingRunner(runner.settings)._publish_holdings(producer, "details", reordered))
+            self.assertEqual(produce.call_count, 5)
 
 
 class RunnerLoopTests(unittest.TestCase):
-    def test_one_second_polling_checks_orders_even_when_holdings_are_unchanged(self):
+    def test_default_cadence_publishes_full_unchanged_account_every_thirty_seconds(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             settings = Settings({"fangde": {"accountId": "A"}, "kafka": {
@@ -206,7 +187,9 @@ class RunnerLoopTests(unittest.TestCase):
                     return {}
                 starts.append(now)
                 now += 0.2
-                return {"positions": [], "orders": [{"observation": len(starts)}],
+                return {"cash": {"balances": [{"currency": "USD", "balance": "100"}]},
+                        "positions": [{"symbol": "AAPL", "quantity": "2", "cost": "10"}],
+                        "orders": [{"observation": len(starts)}],
                         "queriedAt": datetime.fromtimestamp(now, timezone.utc).isoformat()}
             def poll(timeout):
                 nonlocal now
@@ -226,13 +209,20 @@ class RunnerLoopTests(unittest.TestCase):
                  patch.object(runner, "_publish_orders") as orders, \
                  patch.object(producer, "produce", wraps=producer.produce) as publish:
                 runner.run()
-            self.assertEqual(starts, [0, 1, 2])
+            self.assertEqual(starts, [0, 30, 60])
             for wait in waits:
-                self.assertAlmostEqual(wait, 0.8)
+                self.assertAlmostEqual(wait, 29.8)
             self.assertEqual(orders.call_count, 3)
             self.assertEqual([call.args[1] for call in orders.call_args_list],
                              [[{"observation": n}] for n in (1, 2, 3)])
-            publish.assert_called_once()
+            self.assertEqual(publish.call_count, 3)
+            snapshots = [json.loads(call.kwargs["value"]) for call in publish.call_args_list]
+            self.assertEqual(len({snapshot["ts"] for snapshot in snapshots}), 3)
+            baseline = {key: value for key, value in snapshots[0].items() if key != "ts"}
+            self.assertEqual(baseline["cash"], 100)
+            self.assertEqual(baseline["positions"][0]["qty"], 2)
+            for snapshot in snapshots:
+                self.assertEqual({key: value for key, value in snapshot.items() if key != "ts"}, baseline)
 
     @staticmethod
     def command_results(logs):

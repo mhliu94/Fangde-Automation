@@ -1,5 +1,30 @@
 # Validation record
 
+## Restore periodic account snapshots and rename the service — 2026-11-07
+
+- Regression traced to `2f878bf7c1dfb06f626c4fd13daed5b82baf6458` on November 5:
+  it changed the account interval from 30 seconds to one second and suppressed
+  unchanged snapshots indefinitely. The control server treats snapshots older
+  than five minutes as stale.
+- Restored full account/holdings publication on every successful query, with a
+  30-second default and runtime interval. Immediate post-order refreshes and
+  independent 0.5-second order monitoring remain enabled. Order-status change
+  suppression is unaffected.
+- Renamed the installed user unit to `fangde.service`, enabled it, and removed
+  the stopped/disabled `fangde-runner.service`. Reinstallation now preserves an
+  explicit `service.name`. The prior config/unit were backed up privately and
+  the saved trading state was verified byte-for-byte unchanged.
+- Validation: **246 tests passed**, plus **316 passing subtests**; four existing
+  pandas deprecation warnings remain. Local startup validation, systemd unit
+  verification and `git diff --check` passed.
+- Read back three complete live `account-details` messages from partition 0,
+  offsets `2745141`, `2745179`, and `2745221`, with identical account data and
+  five positions. Fresh timestamps were 02:51:46.530, 02:52:15.013 and
+  02:52:44.861 UTC. Query starts target 30 seconds; response times account for
+  the observed 28.48/29.85-second publication gaps. The diagnostic consumer used
+  direct partition assignment and no offset commits. Control-server receipt
+  itself was not independently observed.
+
 ## Order reconciliation and independent monitoring — 2026-11-06
 
 - The 100-share AEHL sell received at 2026-11-05 15:59:08 EST was blocked

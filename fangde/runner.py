@@ -178,7 +178,6 @@ class TradingRunner:
         self.api_executor = None
         self.order_publisher = None
         self.order_monitor = None
-        self._published_holdings_state = None
         self.state_path = settings.work_dir / "trading-state.json"
         self.stop_path = settings.work_dir / "runner.stop"
         self.pid_path = settings.work_dir / "runner.pid.json"
@@ -280,18 +279,10 @@ class TradingRunner:
         return self.order_publisher.publish(snapshots, deliver)
 
     def _publish_holdings(self, producer, topic, snapshot):
-        # Observation times and broker row ordering are not account changes.
-        state = {key: value for key, value in snapshot.items() if key != "ts"}
-        state["positions"] = sorted(state["positions"], key=lambda row: json.dumps(row, sort_keys=True))
-        fingerprint = json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        if fingerprint == self._published_holdings_state:
-            return None
-        result = self._publish_snapshot(producer, topic, snapshot,
+        # Full account snapshots also establish freshness at the control server.
+        # Publish every successful query, even when only its timestamp changed.
+        return self._publish_snapshot(producer, topic, snapshot,
             timeout=float(self.settings.get("kafka.deliveryTimeoutSeconds", 10)))
-        # Only acknowledged data may suppress a future publication. A failed
-        # send retries on the next poll; a restart publishes a fresh baseline.
-        self._published_holdings_state = fingerprint
-        return result
 
     def _reject_unsubmitted(self, command, reason):
         """Persist terminal feedback before committing a discarded command.
@@ -366,7 +357,7 @@ class TradingRunner:
         command_topic = str(self.settings.require("kafka.commandTopic"))
         details_topic = str(self.settings.require("kafka.accountDetailsTopic"))
         group = str(self.settings.require("kafka.consumerGroupId"))
-        interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 1))
+        interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 30))
         poll_seconds = float(self.settings.get("kafka.pollTimeoutSeconds", 1))
         maximum_age = float(self.settings.get("kafka.maxCommandAgeSeconds", 300))
         commit_failed = bool(self.settings.get("kafka.commitFailedCommands", True))
@@ -398,7 +389,7 @@ class TradingRunner:
         holdings_trigger = "startup"
         holdings_command_id = None
         holdings_order_started = None
-        LOG.info("Runner started for account_id=%s topic=%s backend=%s holdings_interval_s=%g publish_on_change=true.",
+        LOG.info("Runner started for account_id=%s topic=%s backend=%s holdings_interval_s=%g publish_on_change=false.",
                  account_id, command_topic, self.backend, interval)
         try:
             if self.api_executor is not None:
@@ -451,19 +442,17 @@ class TradingRunner:
                         snapshot = holdings_snapshot(holdings, self.settings, trading_enabled)
                         holdings_stage = "publish"
                         publish_started = time.perf_counter()
-                        delivery = self._publish_holdings(producer, details_topic, snapshot)
-                        if delivery is not None:
-                            partition, offset = delivery
-                            LOG.info(
-                                "Published holdings with %d positions to partition=%d offset=%d. "
-                                "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
-                                "order_to_update_s=%s next_interval_s=%g",
-                                len(snapshot["positions"]), partition, offset,
-                                holdings_trigger, holdings_command_id, time.perf_counter() - holdings_started,
-                                time.perf_counter() - publish_started,
-                                round(time.perf_counter() - holdings_order_started, 3)
-                                if holdings_order_started is not None else None, interval,
-                            )
+                        partition, offset = self._publish_holdings(producer, details_topic, snapshot)
+                        LOG.info(
+                            "Published holdings with %d positions to partition=%d offset=%d. "
+                            "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
+                            "order_to_update_s=%s next_interval_s=%g",
+                            len(snapshot["positions"]), partition, offset,
+                            holdings_trigger, holdings_command_id, time.perf_counter() - holdings_started,
+                            time.perf_counter() - publish_started,
+                            round(time.perf_counter() - holdings_order_started, 3)
+                            if holdings_order_started is not None else None, interval,
+                        )
                     except Exception as error:
                         if isinstance(error, AuthenticationRequired):
                             self._authentication_required(error)

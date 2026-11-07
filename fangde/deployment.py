@@ -193,7 +193,7 @@ def _install(account_file, *, state_dir=None, settings_path=None, kafka_bootstra
         config.setdefault('kafka', {}).setdefault('consumerGroupId', 'fangde-' + identity['account_id'])
         if not config['kafka']['consumerGroupId']:
             config['kafka']['consumerGroupId'] = 'fangde-' + identity['account_id']
-        config.setdefault('service', {})['name'] = 'fangde-' + identity['account_id'] + '-runner'
+        config.setdefault('service', {}).setdefault('name', 'fangde-' + identity['account_id'] + '-runner')
         validate_config(config)
         require_kafka(config['kafka'].get('bootstrapServers'))
         settings = Settings(_merge(DEFAULTS, config), config_path, root)

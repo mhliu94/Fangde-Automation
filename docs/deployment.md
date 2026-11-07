@@ -208,6 +208,11 @@ separately, after configuring its password and TLS files:
 systemctl --user enable --now fangde-FANGDE-A-monitor.service
 ```
 
+An explicit `service.name` overrides the runner's unit name and is preserved on
+reinstallation. For example, `"name": "fangde"` renders `fangde.service` and
+`fangde-monitor.service`. When renaming an installed unit, stop and disable the
+old runner unit before enabling the new one, and remove the old unit file.
+
 For startup without an interactive login, the administrator can enable the user's
 systemd lingering with `sudo loginctl enable-linger USERNAME`. Both units append to
 separate files in the account's `logs/` directory. Generated unit paths are printed

@@ -75,6 +75,16 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(result['session_replaced'])
         self.assertEqual(load_session(settings.session_path)['session'],self.state['session'])
 
+    def test_reinstall_preserves_custom_service_name(self):
+        result=self.install();settings=load_settings(result['config'])
+        config=json.loads(settings.path.read_text())
+        config['service']['name']='fangde'
+        save_session(settings.path,config)
+        result=self.install()
+        self.assertEqual(load_settings(result['config']).get('service.name'),'fangde')
+        self.assertEqual({Path(unit).name for unit in result['units']},
+                         {'fangde.service','fangde-monitor.service'})
+
     def test_another_account_cannot_replace_the_checkout_or_state(self):
         first=self.install();before=Path(first['config']).read_bytes()
         other=copy.deepcopy(self.state);other['identity']['account_id']='OTHER'
