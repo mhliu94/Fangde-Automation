@@ -218,11 +218,11 @@ class RunnerLoopTests(unittest.TestCase):
             self.assertEqual(publish.call_count, 3)
             snapshots = [json.loads(call.kwargs["value"]) for call in publish.call_args_list]
             self.assertEqual(len({snapshot["ts"] for snapshot in snapshots}), 3)
-            baseline = {key: value for key, value in snapshots[0].items() if key != "ts"}
+            baseline = {key: value for key, value in snapshots[0].items() if key not in {"ts", "sequence"}}
             self.assertEqual(baseline["cash"], 100)
             self.assertEqual(baseline["positions"][0]["qty"], 2)
             for snapshot in snapshots:
-                self.assertEqual({key: value for key, value in snapshot.items() if key != "ts"}, baseline)
+                self.assertEqual({key: value for key, value in snapshot.items() if key not in {"ts", "sequence"}}, baseline)
 
     @staticmethod
     def command_results(logs):

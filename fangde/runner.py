@@ -184,12 +184,31 @@ class TradingRunner:
         self.lock_path = settings.work_dir / "emulator.lock"
         self.lock_timeout = float(settings.get("automation.lockTimeoutSeconds", 300))
         self.running = True
+        self._recovery_blocked = False
+        import threading
+        from .account_delta import AccountDeltaPublisher
+        self._account_deltas = AccountDeltaPublisher(clock=lambda: time.monotonic())
+        self._holdings_refresh = threading.Event()
+        self._holdings_refresh_until = 0.0
+
+    def request_holdings_refresh(self):
+        # Broker assets may settle after the fill endpoint; retry reads for ten
+        # seconds, publishing only actual changes, then reconcile periodically.
+        self._holdings_refresh_until = time.monotonic() + 10
+        self._holdings_refresh.set()
+
+    def _publish_account_update(self, producer, topic, snapshot):
+        return self._account_deltas.publish(snapshot, lambda event:
+            self._publish_snapshot(producer, topic, event, key=snapshot['account_id'],
+                timeout=float(self.settings.get('kafka.deliveryTimeoutSeconds', 10)))) or (-1, -1)
 
     def _signal(self, signum, frame) -> None:
         LOG.info("Signal %s received; stopping after the current operation.", signum)
         self.running = False
 
     def _trading_enabled(self) -> bool:
+        if self._recovery_blocked:
+            return False
         try:
             return bool(json.loads(self.state_path.read_text(encoding="utf-8"))["tradingEnabled"])
         except (OSError, ValueError, KeyError, TypeError):
@@ -319,7 +338,15 @@ class TradingRunner:
                 LOG.info("Live trading enabled for account_id=%s.", self.settings.require("fangde.accountId"))
             try:
                 if self.backend == "api":
-                    self._operation("recover", {})
+                    from .api_trading import OrderUncertain
+                    try:
+                        self._operation("recover", {})
+                    except OrderUncertain:
+                        # Preserve the unresolved journal and Kafka offsets. Keep
+                        # read-only account/order reporting available for reconciliation.
+                        self._recovery_blocked = True
+                        LOG.error("Order reconciliation required; observation-only mode. "
+                                  "No commands will be consumed until reconciliation and restart.")
                     if self.api_executor is not None:
                         self.api_executor.price_books.start()
                 self._run_kafka()
@@ -383,7 +410,8 @@ class TradingRunner:
         self._write_pid()
         signal.signal(signal.SIGTERM, self._signal)
         signal.signal(signal.SIGINT, self._signal)
-        consumer.subscribe([command_topic])
+        if not self._recovery_blocked:
+            consumer.subscribe([command_topic])
         trading_enabled = self._trading_enabled()
         next_holdings = time.monotonic()
         holdings_trigger = "startup"
@@ -405,6 +433,10 @@ class TradingRunner:
                 self.order_monitor.start()
             while self.running and not self.stop_path.exists():
                 now = time.monotonic()
+                if self._holdings_refresh.is_set():
+                    self._holdings_refresh.clear()
+                    next_holdings = min(next_holdings, now)
+                    holdings_trigger = 'order_change'
                 if now >= next_holdings:
                     poll_started = now
                     holdings_started = time.perf_counter()
@@ -442,7 +474,7 @@ class TradingRunner:
                         snapshot = holdings_snapshot(holdings, self.settings, trading_enabled)
                         holdings_stage = "publish"
                         publish_started = time.perf_counter()
-                        partition, offset = self._publish_holdings(producer, details_topic, snapshot)
+                        partition, offset = self._publish_account_update(producer, details_topic, snapshot)
                         LOG.info(
                             "Published holdings with %d positions to partition=%d offset=%d. "
                             "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
@@ -468,11 +500,16 @@ class TradingRunner:
                     # Target start-to-start cadence without overlapping requests
                     # or accumulating catch-up polls when the broker is slow.
                     next_holdings = max(poll_started + interval, time.monotonic())
+                    if time.monotonic() < self._holdings_refresh_until:
+                        next_holdings = min(next_holdings, time.monotonic() + 1)
                     holdings_trigger = "periodic"
                     holdings_command_id = None
                     holdings_order_started = None
                 if not self.running:
                     break
+                if self._recovery_blocked:
+                    self._holdings_refresh.wait(min(.5, max(0, next_holdings - time.monotonic())))
+                    continue
                 message = consumer.poll(min(poll_seconds, max(0, next_holdings - time.monotonic())))
                 if message is None:
                     continue

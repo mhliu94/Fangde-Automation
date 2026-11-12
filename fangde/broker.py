@@ -116,8 +116,8 @@ class ApiTrading(WorkflowBase):
             identifier = order_id(row)
             snapshot = order_snapshot(row, self.settings, observed_at=datetime.now(timezone.utc),
                                       command_id=commands.get(identifier) or tracked.get(identifier))
-            publisher.stage([snapshot])
-            if self.on_order_observed:
+            changed = publisher.stage([snapshot])
+            if changed and self.on_order_observed:
                 self.on_order_observed()
             seen.add(identifier)
         for raw in raw_rows:

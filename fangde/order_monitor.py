@@ -16,11 +16,11 @@ class OrderMonitor:
         self.runner = runner
         self.producer = producer
         self.api = ApiTrading(runner.settings)
-        self.interval = float(runner.settings.get("kafka.orderPollIntervalSeconds", 0.5))
+        self.interval = max(.05, min(1.0, float(runner.settings.get("kafka.orderPollIntervalSeconds", 0.5))))
         self.stop = threading.Event()
         self.changed = threading.Event()
         self.poll_now = threading.Event()
-        self.api.on_order_observed = self.changed.set
+        self.api.on_order_observed = self._observed
         self.threads = []
 
     def start(self):
@@ -30,7 +30,12 @@ class OrderMonitor:
             thread.start()
         LOG.info("Independent order monitoring started interval_s=%g publish_on_change=true.", self.interval)
 
+    def _observed(self):
+        self.changed.set()
+        self.runner.request_holdings_refresh()
+
     def wake(self):
+        self.runner.request_holdings_refresh()
         self.changed.set()
         self.poll_now.set()
 
