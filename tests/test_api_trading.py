@@ -90,6 +90,14 @@ class TradingTests(unittest.TestCase):
 
     def writes(self,name): return [x for x in self.broker.calls if x[:2]==('write',name)]
 
+    def test_exact_cancel_plan_never_falls_back_to_cancel_all(self):
+        from fangde.runner import command_plan
+        plan = command_plan({"type": "CANCEL_ORDER", "order_id": "11"})
+        self.assertEqual(plan.arguments, {"identifier": "11"})
+        for identifier in (None, "", " 11", True, 11):
+            with self.subTest(identifier=identifier), self.assertRaises(ValueError):
+                command_plan({"type": "CANCEL_ORDER", "order_id": identifier})
+
     def test_preview_does_not_submit(self):
         result=self.trading.limit_order('BIYA','2.28','2','buy',dry_run=True)
         self.assertFalse(result['submitted']);self.assertEqual(self.writes('submit'),[])
