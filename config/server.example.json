@@ -17,7 +17,7 @@
     "subjectSha256": "",
     "brokerTimezone": "Asia/Hong_Kong",
     "maxOrderPages": 100,
-    "orderActionDelaySeconds": 5,
+    "orderActionDelaySeconds": 0,
     "postOrderPublishDelaySeconds": 0,
     "fokWaitSeconds": 2,
     "positionCost": "average",
