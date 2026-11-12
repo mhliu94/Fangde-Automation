@@ -22,6 +22,12 @@ consumer reconstructs complete accounts, ignores duplicates and retired streams,
 disables algorithms for a gapped account until a full checkpoint restores its state.
 Legacy snapshots remain supported for rolling upgrades. Upgrade consumers first.
 
+If startup finds an unresolved order with no confirmed broker ID, the runner stays
+in observation-only mode. It publishes accounts with `trading_enabled=false`, keeps
+order polling, and does not subscribe to or commit command messages. The journal
+is preserved. Reconcile the exact order with the broker, then restart the service;
+do not delete the record or resend the command to clear the hold.
+
 ## systemd
 
 Use system services so workers survive logout and reboot:
