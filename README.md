@@ -139,3 +139,5 @@ sequences and the account's enabled state. Do not share one state directory betw
 command-center emulator settings. The backend is API-only; Linux needs the private
 account export but no phone, emulator, Android SDK, interception proxy, or GigaMoney
 signing profile. Configure passwords locally on Windows as described in deployment.
+
+KTrader and Nextgen use `LIMIT_ORDER_IOC` with `time_in_force: IOC` for a limit followed by cancellation of its remaining shares. Partial fills count. The listener also accepts the previous `LIMIT_ORDER_FOK` spelling for retained commands.
