@@ -1,5 +1,6 @@
 """Signed Fangde API with account-bound, optional password session renewal."""
 from __future__ import annotations
+from fangde import latency
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -134,6 +135,7 @@ class ApiClient:
             yield state
     def account_context(self):
         with self._session() as state: return dict(state["identity"])
+    @latency.timed("broker_request", "_send", arg=3)
     def _send(self, state, method, path, fields):
         if set(fields) & {"token", "tradeToken", "_t", "_sign"}:
             raise ValueError("Request cannot override authentication fields.")

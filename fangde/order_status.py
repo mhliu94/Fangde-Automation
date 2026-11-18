@@ -1,6 +1,7 @@
 """KTrader v1 order snapshots and a durable, acknowledged Kafka outbox."""
 from __future__ import annotations
 
+from fangde import latency
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -309,7 +310,8 @@ class OrderStatusPublisher:
                             snapshot = record["pending"]
                         if snapshot is None:
                             break
-                        partition, offset = deliver(snapshot)
+                        with latency.span("report_delivery", "order_status", snapshot):
+                            partition, offset = deliver(snapshot)
                         with self._lock():
                             record = self._read(identifier)
                             if record["pending"] != snapshot:
