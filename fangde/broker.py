@@ -227,7 +227,8 @@ class ApiTrading(WorkflowBase):
                 currency=row.get("ccy")
                 if currency not in ("USD","HKD","CNY","EUR","GBP","JPY"):
                     raise ValueError("Unrecognized cash currency.")
-                balances.append({"currency":currency,"balance":str(decimal(row.get("amt")))})
+                amount = row.get("avail_amt") if currency == "USD" else row.get("amt")
+                balances.append({"currency":currency,"balance":str(decimal(amount))})
             if not balances or len({row["currency"] for row in balances})!=len(balances):
                 raise ValueError("Incomplete cash balances.")
             observed=datetime.now(timezone.utc)

@@ -41,7 +41,7 @@ class Broker:
         self.positions={'products':[{'exchange':'US','asset_type':'Stock','symbol':'BIYA',
             'qty':'10','avail_sell_qty':'8','avg_cost':'2','last_price':'2.3',
             'market_value':'23','today_pl':'1','today_pl_percent':'4.55'}],
-            'cash':[{'ccy':'USD','amt':'123.45'}]}
+            'cash':[{'ccy':'USD','amt':'123.45','avail_amt':'83.45','hold_amt':'40','cash_withdraw':'20'}]}
 
     def read(self, name, params=None):
         self.calls.append(('read',name,copy.deepcopy(params)))
@@ -97,6 +97,10 @@ class TradingTests(unittest.TestCase):
         for identifier in (None, "", " 11", True, 11):
             with self.subTest(identifier=identifier), self.assertRaises(ValueError):
                 command_plan({"type": "CANCEL_ORDER", "order_id": identifier})
+
+    def test_cash_uses_usd_available_after_holds(self):
+        result = self.trading.query(include_orders=False)
+        self.assertEqual(result["cash"]["balances"], [{"currency":"USD","balance":"83.45"}])
 
     def test_preview_does_not_submit(self):
         result=self.trading.limit_order('BIYA','2.28','2','buy',dry_run=True)
