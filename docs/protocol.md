@@ -29,9 +29,15 @@ settings or followed to redirects. Response size and timeout are bounded.
 Submit fields follow `BaseTradeService` and `PlaceOrderConformViewModel`: symbol,
 exchange, side, order type, quantity, price, reference market price, validity,
 extended-session flag and the empty optional coupon/transfer fields. The market
-ticket's reference price behavior comes from `PlaceOrderData`. No live mutation
-response has been captured by this project. A submit response without an exact
-string `order_no` is treated as uncertain, never coerced or retried.
+ticket's reference price behavior comes from `PlaceOrderData`. Fangde can return application-level success without an order number.
+The runner uses an exact broker ticket when supplied. For an ordinary limit
+sell with a successful unnumbered acknowledgement, it compares the account's
+orders before submission and after acknowledgement. It requires exactly one
+new order for that symbol in the bounded send/acknowledgement window, matching
+side, type, quantity and price, then verifies the ticket by an independent
+detail read. It journals the link before publishing the correlated status.
+Timeouts, conflicting candidates and unverified IDs retain the reconciliation
+hold. Recovery never resends the submission.
 
 Normal and strategy orders use different status meanings. Strategy descriptions
 are mapped explicitly; their numeric codes are not interpreted as normal-order

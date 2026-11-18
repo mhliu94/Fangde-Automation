@@ -53,6 +53,10 @@ class TransportError(SessionError):
     """A read can be retried; a mutation must first be reconciled."""
 
 
+class AcceptedWithoutOrderNumber(TransportError):
+    """The submit returned application-level success without a broker ticket."""
+
+
 @dataclass(frozen=True)
 class ApiResult:
     path: str
@@ -177,7 +181,10 @@ class ApiClient:
                 scope=scope, api_code=code, http_status=200, endpoint=path)
         value=ApiResult(path,200,code,(time.monotonic()-start)*1000,stamp,fd.redact(result,(token,trade)))
         if not value.ok: raise ApiError(value)
-        if "data" not in value.payload: raise TransportError("Fangde success response is missing data.")
+        if "data" not in value.payload:
+            if path == "/trade/index/orderActionAdd":
+                raise AcceptedWithoutOrderNumber("Successful Fangde submission omitted data.")
+            raise TransportError("Fangde success response is missing data.")
         return value
     def read(self, endpoint, params=None):
         if endpoint not in READ_PATHS: raise ValueError("Unsupported Fangde read operation.")
@@ -283,7 +290,11 @@ class TradingApiClient(ApiClient):
             before_send()
             data=self._send(state,"POST",path,fields).payload["data"]
             if operation=="submit":
-                if not isinstance(data,dict) or not isinstance(data.get("order_no"),str) or not data["order_no"]:
+                if isinstance(data, str) and re.fullmatch(r"[0-9]{8}US[0-9]+", data):
+                    return {"order_id_str": data}
+                if not isinstance(data,dict) or data.get("order_no") in (None, ""):
+                    raise AcceptedWithoutOrderNumber("Successful Fangde submission omitted order_no.")
+                if not isinstance(data["order_no"], str):
                     raise TransportError("No exact order number returned. Do not resubmit; reconcile manually.")
                 return {"order_id_str":data["order_no"]}
             return data

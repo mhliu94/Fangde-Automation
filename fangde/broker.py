@@ -256,7 +256,8 @@ class ApiTrading(WorkflowBase):
         owned,available=decimal(rows[0].get("qty")),decimal(rows[0].get("avail_sell_qty"))
         pending=Decimal(0)
         dormant=Decimal(0)
-        for order in self._orders():
+        orders = self._orders()
+        for order in orders:
             if order["counter_id"]!=counter or order["action"]!="2": continue
             if order["status"] not in ACTIVE|TERMINAL: raise ValueError("Unknown sell status prevents an availability check.")
             if order["status"] in ACTIVE:
@@ -279,6 +280,8 @@ class ApiTrading(WorkflowBase):
             raise ValueError(f"Sell exceeds available long shares after pending sells: requested={quantity}, "
                              f"available={effective}, broker_available={available}, pending_submitted={pending}.")
 
+        return [order_id(order) for order in orders if order["counter_id"] == counter]
+
     def _prepare(self,symbol,quantity,side,price):
         self._guard_submission()
         quantity=exact_positive(quantity,"quantity")
@@ -294,7 +297,7 @@ class ApiTrading(WorkflowBase):
         if security.get("symbol")!=symbol or security.get("exchange")!="US" or str(security.get("is_delisted","0"))=="1":
             raise ValueError("Security identity is unavailable or delisted.")
         counter="ST/US/"+symbol
-        if side=="Sell": self._guard_sell(counter,quantity)
+        previous_ids = self._guard_sell(counter,quantity) if side == "Sell" else None
         session=market_session() if price is None else "limit"
         extended=price is not None or session!="regular"
         if price is None and extended and not self.settings.get("api.extendedHoursMarketOrders",True):
@@ -314,7 +317,7 @@ class ApiTrading(WorkflowBase):
             body.update(price=effective,force_only_rth="2")
             pricing.update(submittedPrice=effective,priceSource="command" if price is not None else "kafka_book")
         else: pricing["priceSource"]="broker_market_execution"
-        return body,pricing
+        return body,pricing,previous_ids
 
     def cancel_order(self, identifier, *, dry_run=False):
         with self._lock():

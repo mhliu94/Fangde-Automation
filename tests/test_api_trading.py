@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from fangde.api import ApiResult, ApiError, TransportError, AuthenticationRequired
+from fangde.api import AcceptedWithoutOrderNumber, ApiResult, ApiError, TransportError, AuthenticationRequired
 from fangde.api_trading import ApiTrading, OrderUncertain
 from fangde.broker import normalize_order, market_session
 from fangde.config import Settings, DEFAULTS
@@ -127,6 +127,37 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(record['authentication_error']['scope'],'trade')
         with self.assertRaisesRegex(ValueError,'previously rejected'):
             self.trading.limit_order('BIYA','2.28','2','Buy')
+
+    def accept_without_number(self, *, duplicate=False):
+        from zoneinfo import ZoneInfo
+        original = self.broker.write
+
+        def submit(name, body, *, before_send):
+            ack = original(name, body, before_send=before_send)
+            row = self.broker.orders[ack["order_id_str"]]
+            row["local_create_time"] = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
+            if duplicate:
+                self.broker.orders["other"] = dict(row, order_no="other")
+            raise AcceptedWithoutOrderNumber("Successful submission omitted order_no.")
+        self.broker.write = submit
+
+    def test_accepted_unnumbered_sell_links_exact_detail_and_replay_does_not_resubmit(self):
+        self.accept_without_number()
+        self.broker.orders["existing"] = raw_order(order_no="existing", bs_flag="S", qty="2", price="2.28")
+        result = self.trading.limit_order("BIYA", "2.28", "2", "Sell")
+        self.assertEqual(result["orderId"], "9007199254740993123")
+        self.assertEqual(self.trading.journal.read("test-command")["correlation"], "confirmed_submit_window")
+        self.assertTrue(self.trading.limit_order("BIYA", "2.28", "2", "Sell")["deduplicated"])
+        self.assertEqual(len(self.writes("submit")), 1)
+
+    def test_two_new_orders_do_not_release_an_unnumbered_sell(self):
+        self.accept_without_number(duplicate=True)
+        with self.assertRaises(OrderUncertain):
+            self.trading.limit_order("BIYA", "2.28", "2", "Sell")
+        with self.assertRaises(OrderUncertain):
+            self.trading.recover_pending()
+        self.assertNotIn("order_id", self.trading.journal.read("test-command"))
+        self.assertEqual(len(self.writes("submit")), 1)
 
     def test_operator_reconciliation_matches_intent_without_resubmitting(self):
         self.broker.fail_submit=True

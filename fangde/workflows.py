@@ -10,7 +10,7 @@ from pathlib import Path
 import time
 import uuid
 
-from .api import ApiError, SessionError, TransportError, AuthenticationRequired, TradingApiClient, save_session
+from .api import AcceptedWithoutOrderNumber, ApiError, SessionError, TransportError, AuthenticationRequired, TradingApiClient, save_session
 from .diagnostics import command_context, command_source_context, logged_workflow, workflow_attempt, workflow_retry, workflow_step
 from .lock import EmulatorLock
 from .orders import OrderAutomation
@@ -153,17 +153,55 @@ class WorkflowBase:
 
 
 
+    @staticmethod
+    def _matches_ticket(row, request):
+        return (row.get("counter_id") == request["counter_id"] and str(row.get("action")) == request["action"]
+                and decimal(row["quantity"]) == decimal(request["quantity"])
+                and row.get("order_type") == request["order_type"]
+                and (request["order_type"] != "LO" or decimal(row["price"]) == decimal(request["price"])))
+
+    def _accepted_sell_candidate(self, record):
+        # This read-only fallback is limited to a successful ordinary limit sell.
+        # Transport timeouts and orders requesting automatic cancellation retain the manual hold.
+        if (record.get("phase") != "accepted_without_id" or "before_order_ids" not in record
+                or record["intent"].get("kill") or record["request"]["action"] != "2"
+                or record["request"]["order_type"] != "LO"):
+            return None
+        sent, ack = record["sent_at"], record["acknowledged_at"]
+        if not 0 <= ack - sent <= 5:
+            return None
+        existing = set(record["before_order_ids"])
+        candidates = []
+        for row in self._orders():
+            if row["counter_id"] != record["request"]["counter_id"] or order_id(row) in existing:
+                continue
+            created = datetime.fromisoformat(row["submitted_at"]).timestamp()
+            if int(sent) <= created <= ack:
+                candidates.append(row)
+        if len(candidates) != 1 or not self._matches_ticket(candidates[0], record["request"]):
+            return None
+        identifier = order_id(candidates[0])
+        if any(r.get("intent") and r.get("order_id") == identifier for r in self.journal.records()):
+            return None
+        return candidates[0]
+
     def _reconcile(self, record, key):
         workflow_step("reconcile_submission")
-        if not record.get("order_id"):
-            raise OrderUncertain("Fangde did not return an order number. Broker-side request-ID lookup is unavailable; reconcile manually. No request was resent.", submitted=bool(record.get("sent_at")))
-        row = self._detail(record["order_id"])
-        expected = record["request"]
-        if (row.get("counter_id") != expected["counter_id"] or str(row.get("action")) != expected["action"]
-                or decimal(row.get("quantity")) != decimal(expected["quantity"])
-                or row.get("order_type") != expected["order_type"]
-                or (expected["order_type"] == "LO" and decimal(row.get("price")) != decimal(expected["price"]))):
+        identifier = record.get("order_id")
+        candidate = None
+        if not identifier:
+            candidate = self._accepted_sell_candidate(record)
+            if candidate is None:
+                raise OrderUncertain("No unambiguous broker order number; reconcile manually. No request was resent.",
+                                     submitted=bool(record.get("sent_at")))
+            identifier = order_id(candidate)
+        row = self._detail(identifier)
+        if (not self._matches_ticket(row, record["request"])
+                or (candidate and candidate["submitted_at"] != row["submitted_at"])):
             raise OrderUncertain("Acknowledged order does not match the intended ticket.", submitted=True)
+        if candidate:
+            record.update(order_id=identifier, phase="accepted", correlation="confirmed_submit_window")
+            self.journal.save(key, record)
         self._observe_order(row, key)
         return row
 
@@ -209,7 +247,7 @@ class WorkflowBase:
             workflow_attempt(1)
             if dry_run or no_submit:
                 workflow_step("prepare_ticket")
-                body, pricing = self._prepare(symbol, quantity, side, price)
+                body, pricing, _ = self._prepare(symbol, quantity, side, price)
                 return {"ok": True, "dryRun": dry_run, "submitted": False, "kill": kill,
                         "ticket": {k: v for k, v in body.items() if k != "card_ids"}, "pricing": pricing}
             self._order_action_delay()
@@ -223,13 +261,15 @@ class WorkflowBase:
                     raise ValueError("This command was previously rejected; use a new command ID for a new intent.")
             if not record or record["phase"] == "prepared":
                 workflow_step("prepare_ticket")
-                body, pricing = self._prepare(symbol, quantity, side, price)
+                body, pricing, previous_ids = self._prepare(symbol, quantity, side, price)
                 # Local correlation only; Fangde has no verified request-ID lookup.
                 previous = [int(row["request"]["client_request_id"]) for row in self.journal.records() if row.get("request")]
                 request_id = str(max([time.time_ns() // 1_000_000, *[x + 1 for x in previous]]))
                 body["client_request_id"] = request_id
                 record = {"account": self.journal.account, "command_id": key, "fingerprint": fingerprint,
                           "intent": intent, "request": body, "pricing": pricing, "phase": "prepared"}
+                if previous_ids is not None and price is not None and not kill:
+                    record["before_order_ids"] = previous_ids
                 if command_source_context.get() is not None:
                     record["source"] = dict(command_source_context.get())
                 self.journal.save(key, record)
@@ -240,6 +280,9 @@ class WorkflowBase:
                 try:
                     response = self.client.write("submit", body, before_send=sent)
                     record.update(order_id=order_id(response), phase="accepted")
+                    self.journal.save(key, record)
+                except AcceptedWithoutOrderNumber as error:
+                    record.update(phase="accepted_without_id", acknowledged_at=time.time(), ack_detail=str(error))
                     self.journal.save(key, record)
                 except ApiError as error:
                     # A server-side failure can be ambiguous even with an HTTP reply.
@@ -253,7 +296,8 @@ class WorkflowBase:
                         record["phase"] = "rejected"
                     self.journal.save(key, record)
                     raise
-                except (SessionError, ValueError, KeyError, OSError):
+                except (SessionError, ValueError, KeyError, OSError) as error:
+                    record["failure_type"] = type(error).__name__
                     if record["phase"] == "prepared":
                         raise
                     record["phase"] = "ambiguous"

@@ -143,6 +143,13 @@ class TransportTests(unittest.TestCase):
             with self.assertRaises(AuthenticationRequired) as caught:self.client.read('positions')
             self.assertEqual((caught.exception.scope,caught.exception.api_code),(scope,code))
 
+    def test_unnumbered_success_is_distinct_from_unknown_delivery(self):
+        from fangde.api import AcceptedWithoutOrderNumber
+        for payload in ({"status": 0}, {"status": 0, "data": {}}, {"status": 0, "data": None}):
+            self.opener.data = payload
+            with self.assertRaises(AcceptedWithoutOrderNumber):
+                self.client.write("submit", self.body, before_send=lambda: None)
+
     def test_numeric_ack_is_not_coerced_to_order_id(self):
         self.opener.data={'status':0,'data':{'order_no':9007199254740993123}}
         with self.assertRaises(TransportError):self.client.write('submit',self.body,before_send=lambda:None)
