@@ -38,10 +38,15 @@ class OrderAutomation:
 
     @classmethod
     def order_price(cls, value: str, side: str, name: str = "price") -> str:
-        """Keep cent prices; round finer prices toward the requested order side."""
+        """Preserve valid sub-dollar ticks and apply cent rounding at or above $1."""
         requested = cls.positive_number(value, name)
         side = cls.normalize_side(side)
         parsed = Decimal(requested)
+        if parsed < 1:
+            tick_price = parsed.quantize(Decimal("0.0001"))
+            if tick_price != parsed:
+                raise ValueError(f"{name} below $1 must be a multiple of $0.0001.")
+            return requested if parsed.as_tuple().exponent >= -4 else format(tick_price, "f")
         if parsed.as_tuple().exponent >= -2:
             return requested
         with localcontext() as context:
@@ -49,8 +54,6 @@ class OrderAutomation:
             rounded = parsed.quantize(
                 Decimal("0.01"), rounding=ROUND_CEILING if side == "Buy" else ROUND_FLOOR,
             )
-        if rounded <= 0:
-            raise ValueError(f"{name} rounds down to zero for Sell; use a price of at least 0.01.")
         effective = format(rounded, "f")
         if requested != effective:
             LOG.info(
