@@ -102,6 +102,29 @@ class TradingTests(unittest.TestCase):
         result=self.trading.limit_order('BIYA','2.28','2','buy',dry_run=True)
         self.assertFalse(result['submitted']);self.assertEqual(self.writes('submit'),[])
 
+    def test_sub_dollar_limit_and_ioc_preserve_the_requested_price(self):
+        for side, price, kill in (("Buy", "0.1238", False), ("Sell", "0.0099", True)):
+            with self.subTest(side=side, price=price):
+                key = f"sub-dollar-{side}"
+                token = command_context.set(key)
+                try:
+                    result = self.trading.limit_order("BIYA", price, "2", side, kill=kill)
+                finally:
+                    command_context.reset(token)
+                self.assertTrue(result["submitted"])
+                self.assertEqual(self.writes("submit")[-1][2]["price"], price)
+                self.assertEqual(self.trading.journal.read(key)["request"]["price"], price)
+
+    def test_sub_dollar_extended_market_and_off_tick_prices(self):
+        self.books.price = lambda *args: SimpleNamespace(price="0.0099", details=lambda: {})
+        with patch("fangde.broker.market_session", return_value="premarket"):
+            planned = self.trading.market_order("BIYA", "2", "Sell", no_submit=True)
+        self.assertEqual(planned["ticket"]["price"], "0.0099")
+        for price in ("0.12385", "0.00001"):
+            with self.subTest(price=price), self.assertRaisesRegex(ValueError, r"multiple of \$0\.0001"):
+                self.trading.limit_order("BIYA", price, "2", "Buy")
+        self.assertEqual(self.writes("submit"), [])
+
     def test_submission_ack_is_new_not_filled_and_replay_is_deduplicated(self):
         first=self.trading.limit_order('BIYA','2.28','2','Buy')
         second=self.trading.limit_order('BIYA','2.28','2','Buy')
