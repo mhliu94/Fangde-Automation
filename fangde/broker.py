@@ -327,8 +327,10 @@ class ApiTrading(WorkflowBase):
 
     def cancel_order(self, identifier, *, dry_run=False):
         with self._lock():
-            row=self._detail(identifier)
-            if dry_run: return {"dryRun":True,"orderId":identifier,"cancelable":row["cancelable"],"status":row["status"]}
+            if dry_run:
+                row = self._detail(identifier)
+                return {"dryRun":True,"orderId":identifier,"cancelable":row["cancelable"],"status":row["status"]}
+            # The exact-ticket workflow validates current broker detail after any configured delay.
             self._order_action_delay()
             key="cancel:"+identifier
             record=self.journal.read(key) or {"account":self.journal.account,"command_id":key,"phase":"cancel","order_id":identifier}

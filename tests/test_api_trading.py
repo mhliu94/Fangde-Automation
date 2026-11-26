@@ -233,6 +233,7 @@ class TradingTests(unittest.TestCase):
         self.broker.orders[row['order_no']]=row
         result=self.trading.cancel_order(row['order_no'])
         self.assertFalse(result['canceled']);self.assertEqual(self.writes('withdraw'),[])
+        self.assertEqual(sum(call[:2] == ('read','order_detail') for call in self.broker.calls), 1)
 
     def test_non_cancelable_does_not_send(self):
         row=raw_order(enable_cancel='0');self.broker.orders[row['order_no']]=row
