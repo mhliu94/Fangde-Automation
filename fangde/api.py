@@ -117,7 +117,9 @@ def exact_positive(value, name):
 
 class ApiClient:
     def __init__(self, settings, *, opener=None):
-        self.settings, self.opener = settings, opener
+        from .broker_http import BrokerOpener
+        self.settings = settings
+        self.opener = opener or BrokerOpener(settings.get("api.maxResponseBytes", 4194304))
     @classmethod
     def from_settings(cls, settings): return cls(settings)
     @contextmanager
@@ -152,7 +154,7 @@ class ApiClient:
         else:
             body=encoded
             headers["Content-Type"]="application/x-www-form-urlencoded"
-        opener=self.opener or fd.Client(state).opener
+        opener=self.opener
         start=time.monotonic()
         try:
             with opener.open(Request(url,data=body,headers=headers,method=method),

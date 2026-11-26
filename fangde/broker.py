@@ -90,11 +90,12 @@ class ApiTrading(WorkflowBase):
         """
         from .order_status import OrderStatusPublisher, order_snapshot, recorded_broker_refusal
         publisher = OrderStatusPublisher(self.settings)
-        commands = {r["order_id"]: r["command_id"] for r in self.journal.records()
+        records = list(self.journal.records())
+        commands = {r["order_id"]: r["command_id"] for r in records
                     if r.get("order_id") and r.get("intent")}
         tracked = publisher.tracked_orders()
         # Accepted commands can predate the first outbox observation after a crash.
-        for record in self.journal.records():
+        for record in records:
             if record.get("phase") == "rejected" and not record.get("order_id") and not publisher.has_rejection(record["command_id"]):
                 refusal = recorded_broker_refusal(record, self.settings)
                 if refusal is not None:

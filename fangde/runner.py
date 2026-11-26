@@ -279,15 +279,25 @@ class TradingRunner:
             value=json.dumps(snapshot, separators=(",", ":"), allow_nan=False),
             on_delivery=delivered,
         )
-        remaining = int(producer.flush(timeout))
+        # A delivery callback acknowledges this record. Draining unrelated orders
+        # or holdings on the same producer adds their network latency to this one.
+        pending = 0
+        if not delivery["reported"]:
+            poll = getattr(producer, "poll", None)
+            if poll is None:
+                pending = producer.flush(timeout)
+            else:
+                deadline = time.monotonic() + timeout
+                while not delivery["reported"]:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    poll(min(remaining, 0.1))
         if delivery["error"] is not None:
             raise RuntimeError(f"Kafka rejected the {description}: {delivery['error']}")
-        if remaining:
-            raise RuntimeError(
-                f"Kafka did not deliver the {description} within {timeout:g} seconds; "
-                f"{remaining} message(s) remain queued."
-            )
         if not delivery["reported"]:
+            if pending:
+                raise RuntimeError(f"Kafka did not deliver the {description}; {pending} message(s) remain queued.")
             raise RuntimeError(f"Kafka returned no delivery report for the {description}.")
         return int(delivery["partition"]), int(delivery["offset"])
 
@@ -401,6 +411,7 @@ class TradingRunner:
         group = str(self.settings.require("kafka.consumerGroupId"))
         interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 30))
         poll_seconds = float(self.settings.get("kafka.pollTimeoutSeconds", 1))
+        foreign_checkpoint = {}
         maximum_age = float(self.settings.get("kafka.maxCommandAgeSeconds", 300))
         commit_failed = bool(self.settings.get("kafka.commitFailedCommands", True))
         consumer = Consumer({
@@ -557,7 +568,12 @@ class TradingRunner:
                     command_stage = "validate"
                     if str(command.get("account_id", "")).strip() != account_id:
                         log_command = False
-                        consumer.commit(message=message, asynchronous=False)
+                        # Replaying another account's message has no local effect. Bound
+                        # synchronous WAN checkpoints per partition during a burst.
+                        partition = message.partition()
+                        if time.monotonic() >= foreign_checkpoint.get(partition, 0):
+                            consumer.commit(message=message, asynchronous=False)
+                            foreign_checkpoint[partition] = time.monotonic() + 1
                         continue
                     latency.received(command, message, received_ms)
                     source_token = command_source_context.set(source)

@@ -151,3 +151,11 @@ their difference in milliseconds. `command_execution`, `broker_request` and
 `elapsed_ms`. A short hash of the command ID links related events. Broker
 timestamps retain their original precision. Pickup comparisons across hosts
 include any difference between their clocks.
+
+### Order feedback latency
+
+Signed requests reuse verified TLS connections per origin and worker thread. A connection
+failure leaves an ambiguous write in the durable journal for reconciliation. The independent
+order monitor reads command correlations and rejection records in one journal pass.
+Other-account Kafka checkpoints are coalesced per partition. Account-matched commands
+retain their original durability boundary.
