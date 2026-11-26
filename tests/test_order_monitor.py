@@ -83,6 +83,18 @@ class OrderMonitorTests(unittest.TestCase):
             self.assertFalse(runner._reject_unsubmitted(dict(self.command, command_id='dispatched'), 'timeout'))
             self.assertFalse(self.publisher.has_rejection('dispatched'))
 
+    def test_confirmed_dispatched_refusal_is_recovered_with_original_intent(self):
+        intent = {"symbol":"BIYA", "quantity":"100", "side":"Sell", "price":"2.28", "kill":False}
+        self.api.journal.save("blocked", {"account":"TEST", "command_id":"blocked",
+            "phase":"rejected", "sent_at":1, "intent":intent})
+        self.api.poll_order_status()
+        snapshot = self.publisher._read(rejection_id("blocked"))["pending"]
+        self.assertEqual((snapshot["command_id"],snapshot["status"],snapshot["filled_quantity"]), ("blocked","REJECTED",0))
+        self.assertIn("Broker rejected", snapshot["message"])
+        self.assertTrue(TradingRunner(self.settings)._reject_unsubmitted(self.command, "replay"))
+        self.api.poll_order_status()
+        self.assertEqual(self.publisher._read(rejection_id("blocked"))["queued"], [])
+
     def test_half_second_schedule_is_start_to_start_without_overlapping(self):
         runner = TradingRunner(self.settings)
         with patch('fangde.order_monitor.ApiTrading'):

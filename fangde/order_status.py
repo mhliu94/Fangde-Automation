@@ -128,10 +128,10 @@ def rejection_id(command_id):
     return "local-rejected:" + hashlib.sha256(command_id.encode()).hexdigest()
 
 
-def rejection_snapshot(command, settings, *, reason, observed_at):
+def rejection_snapshot(command, settings, *, reason, observed_at, broker_refused=False):
     """A locally rejected intent, explicitly distinguished from a broker ticket.
 
-    Call only with positive evidence that this command was never dispatched.
+    Call only for an unsent command or a journal-confirmed broker refusal.
     An ambiguous submission must never be reported as rejected.
     """
     from .runner import command_plan
@@ -149,8 +149,23 @@ def rejection_snapshot(command, settings, *, reason, observed_at):
            "status": "RejectedStatus", "price": plan.arguments.get("price"),
            "currency": "USD", "time_in_force": "DAY"}
     result = order_snapshot(row, settings, observed_at=observed_at, command_id=identifier)
-    result["message"] = ("Not submitted to broker; locally rejected by Fangde runner: " + reason)[:2000]
+    prefix = "Broker rejected submission: " if broker_refused else "Not submitted to broker; locally rejected by Fangde runner: "
+    result["message"] = (prefix + reason)[:2000]
     return result
+
+
+def recorded_broker_refusal(record, settings):
+    """Build feedback solely from the original durable intent, including after restart."""
+    if (not record.get("sent_at") or record.get("order_id") or record.get("phase") != "rejected"
+            or not record.get("intent")):
+        return None
+    intent = record["intent"]
+    command = {"type": "LIMIT_ORDER" if intent["price"] is not None else "MARKET_ORDER",
+               "command_id": record["command_id"], "symbol": intent["symbol"], "side": intent["side"].upper(),
+               "qty_shares": intent["quantity"], "limit_price": intent["price"],
+               "ts": datetime.fromtimestamp(record["sent_at"], timezone.utc).isoformat()}
+    return rejection_snapshot(command, settings, reason="Definitive refusal recorded without a broker order number.",
+        observed_at=datetime.fromtimestamp(record["updated_at"], timezone.utc), broker_refused=True)
 
 
 class OrderStatusPublisher:

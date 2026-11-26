@@ -320,20 +320,24 @@ class TradingRunner:
         The durable dispatch marker is the authority: absence from a broker list
         or a timeout is never sufficient proof of rejection.
         """
-        from .order_status import OrderStatusPublisher, rejection_snapshot
+        from .order_status import OrderStatusPublisher, recorded_broker_refusal, rejection_snapshot
         from .workflows import OrderJournal
         identifier = str(command["command_id"])
         with EmulatorLock(self.settings.work_dir / "api/operation.lock", self.lock_timeout):
             journal = OrderJournal(self.settings.work_dir / "api/orders",
                                    str(self.settings.require("fangde.accountId")))
             record = journal.read(identifier)
-            if record and (record.get("sent_at") or record.get("order_id")):
-                return False
-            if OrderStatusPublisher(self.settings).has_rejection(identifier):
+            publisher = OrderStatusPublisher(self.settings)
+            if publisher.has_rejection(identifier):
                 return True
-            snapshot = rejection_snapshot(command, self.settings, reason=reason,
-                                          observed_at=datetime.now(timezone.utc))
-            OrderStatusPublisher(self.settings).stage([snapshot])
+            if record and (record.get("sent_at") or record.get("order_id")):
+                snapshot = recorded_broker_refusal(record, self.settings)
+                if snapshot is None:
+                    return False
+            else:
+                snapshot = rejection_snapshot(command, self.settings, reason=reason,
+                                              observed_at=datetime.now(timezone.utc))
+            publisher.stage([snapshot])
         if self.order_monitor:
             self.order_monitor.wake()
         LOG.warning("Unsubmitted command rejection persisted command_id=%s.", identifier)

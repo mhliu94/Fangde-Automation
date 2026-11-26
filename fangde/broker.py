@@ -88,13 +88,17 @@ class ApiTrading(WorkflowBase):
         Session renewal is serialized by ApiClient's session lock. This read
         does not take the financial operation lock or wait for an action delay.
         """
-        from .order_status import OrderStatusPublisher, order_snapshot
+        from .order_status import OrderStatusPublisher, order_snapshot, recorded_broker_refusal
         publisher = OrderStatusPublisher(self.settings)
         commands = {r["order_id"]: r["command_id"] for r in self.journal.records()
                     if r.get("order_id") and r.get("intent")}
         tracked = publisher.tracked_orders()
         # Accepted commands can predate the first outbox observation after a crash.
         for record in self.journal.records():
+            if record.get("phase") == "rejected" and not record.get("order_id") and not publisher.has_rejection(record["command_id"]):
+                refusal = recorded_broker_refusal(record, self.settings)
+                if refusal is not None:
+                    publisher.stage([refusal])
             if (record.get("order_id") and record.get("intent")
                     and record.get("result", {}).get("status") not in TERMINAL):
                 saved = publisher._read(record["order_id"])
